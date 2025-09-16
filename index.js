@@ -1,52 +1,46 @@
-// Bot WhatsApp (Baileys) — sin Chromium/Puppeteer
+// Bot WhatsApp (Baileys) para Railway
 // - QR como link clickeable en logs
-// - Sesión en ./auth (monta Volume en /app/auth si quieres evitar re-escaneo)
-// - Reglas: dudas -> avisa al dueño; pagó -> confirma; recordatorio único; reportes 60min y diario 22:00
+// - Persistencia de sesión en AUTH_DIR (por defecto ./auth)
+// - Si la sesión se corrompe, se borra y vuelve a pedir QR
+// - Flujo: saludo -> nombre -> QR -> recordatorio
+// - Si no entiende: NO responde al cliente; te notifica por WhatsApp
 
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  Browsers
+} = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 
-// =================== CONFIG FIJA (sin variables de entorno) ===================
-const OWNER_PHONE = '59177441414'; // Tu número (solo dígitos con código país)
+// ====== CONFIGURA AQUÍ ======
+const OWNER_PHONE = '59170000000'; // <-- TU número con código de país, solo dígitos
+const LINK_GRUPO   = 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
+const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
+const LINK_PAGO    = 'https://tu-link-de-pago'; // fallback si no hay imagen
+const REMINDER_MINUTES   = 10; // recordatorio al cliente si no responde tras enviarle el QR
+const MIN_NOTIFY_GAP_MIN = 5;  // no notificarte más de 1 vez/5 min por cada cliente
+// ============================
+
+// Carpeta de sesión (puedes fijarla con env var AUTH_DIR en Railway)
+const AUTH_DIR = process.env.AUTH_DIR || './auth';
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
-const LINK_GRUPO = 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
-const LINK_BONO  = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
-const LINK_PAGO  = 'https://tu-link-de-pago'; // fallback si no hay imagen qr.jpg
-
-const PRECIO_BS = '35 Bs';
-const REMINDER_MIN = 5; // recordatorio único si no responde en 5 min
-const TZ = 'America/La_Paz';
-// ============================================================================
-
-// Estado por usuario
-const users = new Map();        // from => { stage, nombre, lastMsg, reminderSent, paid }
-const reminderTimers = new Map(); // from => timeoutId
-
-// Eventos para métricas
-const events = []; // { ts, from, type: 'incoming'|'paid'|'reminder' }
-let lastDailyDate = ''; // YYYY-MM-DD para no repetir reporte diario
-
-// Utilidades de tiempo
-const now = () => Date.now();
-const todayTZ = () => {
-  const d = new Date(new Date().toLocaleString('en-US', { timeZone: TZ }));
-  const y = d.getFullYear(), m = (d.getMonth()+1+'').padStart(2,'0'), dd = (d.getDate()+'').padStart(2,'0');
-  return `${y}-${m}-${dd}`;
-};
-const hourTZ = () => new Date(new Date().toLocaleString('en-US', { timeZone: TZ })).getHours();
+// Memoria simple por contacto (RAM del server)
+const statePerUser = new Map();
 
 // Próximo lunes (“22 de septiembre”)
 function nextMondayDate() {
-  const d = new Date(new Date().toLocaleString('en-US', { timeZone: TZ }));
-  const add = (1 - d.getDay() + 7) % 7 || 7;
-  d.setDate(d.getDate() + add);
+  const now = new Date();
+  const day = now.getDay(); // 0=Dom,1=Lun,...
+  const daysToMon = (8 - day) % 7 || 7;
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMon);
   return d.toLocaleDateString('es-BO', { day: 'numeric', month: 'long' });
 }
 
-// Extraer texto de cualquier mensaje
+// Extraer texto de cualquier tipo de mensaje
 function extractText(m) {
   if (!m || !m.message) return '';
   const msg = m.message;
@@ -55,39 +49,87 @@ function extractText(m) {
     msg.extendedTextMessage?.text ||
     msg.imageMessage?.caption ||
     msg.videoMessage?.caption ||
-    msg.documentMessage?.caption ||
     ''
   ).trim();
 }
 
-// Métricas
-function pushEvent(type, from) { events.push({ ts: now(), from, type }); }
-function computeWindowStats(ms) {
-  const cut = now() - ms;
-  const list = events.filter(e => e.ts >= cut);
-  const talkers = new Set(list.filter(e => e.type === 'incoming').map(e => e.from)).size;
-  const paid = list.filter(e => e.type === 'paid').length;
-  const leftOnSeen = list.filter(e => e.type === 'reminder').length;
-  return { talkers, paid, leftOnSeen };
-}
-function computeDailyStats(dateStr) {
-  const start = new Date(new Date().toLocaleString('en-US', { timeZone: TZ }));
-  const [y,m,d] = dateStr.split('-').map(Number);
-  start.setFullYear(y); start.setMonth(m-1); start.setDate(d); start.setHours(0,0,0,0);
-  const end = new Date(start); end.setDate(start.getDate()+1);
-  const dayEvents = events.filter(e => e.ts >= start.getTime() && e.ts < end.getTime());
-  const talkers = new Set(dayEvents.filter(e => e.type === 'incoming').map(e => e.from)).size;
-  const paid = dayEvents.filter(e => e.type === 'paid').length;
-  const leftOnSeen = dayEvents.filter(e => e.type === 'reminder').length;
-  return { talkers, paid, leftOnSeen };
+// ¿Parece un nombre real?
+function isProbablyName(s) {
+  if (/[?¿!¡]/.test(s)) return false;
+  if (!/^[\p{L} .'\-]+$/u.test(s)) return false;
+  const parts = s.trim().split(/\s+/);
+  if (parts.length < 2) return false;
+  if (parts.some(p => p.length < 2)) return false;
+  const lowered = s.toLowerCase();
+  const badStarts = ['me ', 'puedes ', 'quiero ', 'como ', 'cómo ', 'que ', 'qué ', 'donde ', 'dónde ', 'cuando ', 'cuándo ', 'por que ', 'por qué ', 'porque '];
+  if (badStarts.some(b => lowered.startsWith(b))) return false;
+  if (s.length > 60) return false;
+  return true;
 }
 
-// Mensajes
-function bienvenida(fechaTexto) {
-  return (
-`Hola 🌟 ¡Gracias por tu interés en el *Reto de 21 Días de Gratitud y Abundancia*! 🙏✨
+// Enviar imagen (qr.jpg en la misma carpeta)
+async function sendQR(sock, to) {
+  try {
+    const file = path.join(__dirname, 'qr.jpg');
+    const buffer = fs.readFileSync(file);
+    await sock.sendMessage(to, { image: buffer, caption: 'Escanea este QR para inscribirte ✅' });
+  } catch (e) {
+    console.error('Error enviando QR:', e?.message);
+    await sock.sendMessage(to, { text: `No pude adjuntar el QR ahora. Aquí tienes el enlace de pago: ${LINK_PAGO}` });
+  }
+}
 
-Este hermoso reto se realizará por WhatsApp y empieza el próximo lunes ${fechaTexto} 🗓️
+// Notificar al dueño (tú) cuando el bot no entiende (sin decir nada al cliente)
+async function notifyOwner(sock, customerJid, customerName, msgText) {
+  const human = customerJid.replace('@s.whatsapp.net', '');
+  const nombre = customerName ? ` (${customerName})` : '';
+  const body =
+    `🤖 *Duda detectada*\n` +
+    `De: *${human}*${nombre}\n` +
+    `Mensaje: "${msgText}"`;
+  try {
+    await sock.sendMessage(OWNER_JID, { text: body });
+  } catch (e) {
+    console.error('No pude notificar al dueño:', e?.message);
+  }
+}
+
+// Lógica del bot
+async function handleMessage(sock, m) {
+  const from = m.key?.remoteJid || '';
+  if (!from || from.endsWith('@g.us')) return; // Ignora grupos
+
+  const textRaw = extractText(m);
+  if (!textRaw) return;
+
+  const text = textRaw.replace(/\s+/g, ' ');
+  const lowered = text.toLowerCase();
+  const pushName = m.pushName || '';
+
+  let st = statePerUser.get(from) || { stage: 'start', nombre: '', lastMsg: 0, lastNotify: 0 };
+  st.lastMsg = Date.now();
+  statePerUser.set(from, st);
+
+  const said = (re) => re.test(lowered);
+
+  // Comandos útiles
+  if (said(/^ping$/i)) {
+    await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
+    return;
+  }
+  if (said(/^reset$/i)) {
+    statePerUser.delete(from);
+    await sock.sendMessage(from, { text: '🔄 Reiniciado. Escribe "hola" para comenzar.' });
+    return;
+  }
+
+  // 1) SALUDO
+  if (said(/\b(hola|buen dia|buen día|buenas)\b/i)) {
+    const fecha = nextMondayDate();
+    const bienvenida =
+`Hola 🌟 ¡Gracias por tu interés en el Reto de 21 Días de Gratitud y Abundancia! 🙏✨
+
+Este hermoso reto se realizará por WhatsApp y empieza este lunes ${fecha} 🗓️
 
 📌 Incluye:
 ✔️ Reflexión + ejercicio diario
@@ -98,216 +140,117 @@ Este hermoso reto se realizará por WhatsApp y empieza el próximo lunes ${fecha
 
 Las clases se envían vía WhatsApp por la mañana y puedes verlas cuando gustes.
 
-Si deseas inscribirte, por favor responde con tu *nombre completo* y te paso los pasos para unirte ✅`);
-}
-
-function textoPago(nombre='amigo/a') {
-  return (
-`Buen día, ${nombre}. El reto tiene un valor de *${PRECIO_BS}*.
-
-Si te inscribes hoy, recibes de *regalo* el curso de 12 días: "Aprende a meditar desde cero".
-
-Puedes pagar escaneando el *QR* que te envío o directamente aquí:
-${LINK_PAGO}`);
-}
-
-// Recordatorio único por inactividad
-function programReminder(sock, from) {
-  if (reminderTimers.has(from)) return;
-  const st = users.get(from) || {};
-  if (st.paid) return;
-
-  const tId = setTimeout(async () => {
-    const u = users.get(from) || {};
-    if (u.paid) return;
-    // Si volvió a escribir antes del timeout, no enviar
-    if (now() - (u.lastMsg || 0) < REMINDER_MIN * 60 * 1000) return;
-    if (u.reminderSent) return;
-
-    u.reminderSent = true;
-    users.set(from, u);
-    try {
-      await sock.sendMessage(from, { text: '¿Aún tienes interés en el *Reto de 21 días* y el *regalo del Taller de Meditación*? 🙌' });
-      pushEvent('reminder', from);
-    } catch {}
-  }, REMINDER_MIN * 60 * 1000);
-
-  reminderTimers.set(from, tId);
-}
-function clearReminder(from) {
-  const t = reminderTimers.get(from);
-  if (t) clearTimeout(t);
-  reminderTimers.delete(from);
-}
-
-// Notificar al dueño
-async function notifyOwner(sock, title, from, nombre, text) {
-  const who = from.replace('@s.whatsapp.net', '');
-  const name = nombre ? ` (${nombre})` : '';
-  const body = `*${title}*\n• De: ${who}${name}\n• Mensaje: "${text}"`;
-  try { await sock.sendMessage(OWNER_JID, { text: body }); } catch {}
-}
-
-// Enviar QR de pago (archivo local qr.jpg si existe, si no, link)
-async function sendPaymentQR(sock, to) {
-  const file = path.join(__dirname, 'qr.jpg');
-  if (fs.existsSync(file)) {
-    try {
-      const buffer = fs.readFileSync(file);
-      await sock.sendMessage(to, { image: buffer, caption: 'Escanea este QR para inscribirte ✅' });
-      return;
-    } catch {}
-  }
-  await sock.sendMessage(to, { text: `No pude adjuntar el QR ahora. Aquí tienes el enlace de pago:\n${LINK_PAGO}` });
-}
-
-// Detección de pago/comprobante
-function detectPaid(m, lowered) {
-  const hasImage = !!m.message?.imageMessage;
-  const hasDoc = !!m.message?.documentMessage;
-  const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
-  const textPaid = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
-  return textPaid || hasImage || (hasDoc && isPdf);
-}
-
-// ------------------------- LÓGICA PRINCIPAL -------------------------
-async function handleMessage(sock, m) {
-  const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return; // ignorar grupos
-
-  const textRaw = extractText(m);
-  const text = textRaw.replace(/\s+/g, ' ').trim();
-  const lowered = text.toLowerCase();
-  const pushName = m.pushName || '';
-
-  let st = users.get(from) || { stage: 'start', nombre: '', lastMsg: 0, reminderSent: false, paid: false };
-  st.lastMsg = now();
-  users.set(from, st);
-  pushEvent('incoming', from);
-  clearReminder(from);
-
-  // 1) Pago / comprobante
-  if (detectPaid(m, lowered)) {
-    st.paid = true; users.set(from, st);
-    await sock.sendMessage(OWNER_JID, { text: `✅ *CONFIRMA EL PAGO DE:* ${st.nombre ? `${st.nombre} (${from})` : from}` });
-    await sock.sendMessage(from, { text:
-      '🌟 ¡Bienvenido! Tu registro será verificado en breve.\n\n' +
-      `🔗 Grupo: ${LINK_GRUPO}\n` +
-      `🎁 Bono:  ${LINK_BONO}`
-    });
-    pushEvent('paid', from);
+Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo y te paso los pasos para unirte ✅`;
+    await sock.sendMessage(from, { text: bienvenida });
+    st.stage = 'askedName';
+    statePerUser.set(from, st);
     return;
   }
 
-  // 2) Duda explícita → avisarte (sin responder al cliente)
-  if (/\b(ayuda|agente|humano|asesor|no entiendo|me explicas)\b/.test(lowered)) {
-    await notifyOwner(sock, '🤖 Duda detectada', from, st.nombre, textRaw);
-    return; // silencio al cliente
-  }
-
-  // 3) Saludo
-  if (/\b(hola|buenas|buen d[ií]a|buen dia)\b/.test(lowered) || st.stage === 'start') {
-    st.stage = 'askedName'; st.reminderSent = false; users.set(from, st);
-    await sock.sendMessage(from, { text: bienvenida(nextMondayDate()) });
-    programReminder(sock, from);
-    return;
-  }
-
-  // 4) Nombre si estamos esperando nombre (2+ palabras, sin dígitos)
+  // 2) NOMBRE → SOLO si antes se pidió nombre y además cumple patrón
   if (st.stage === 'askedName') {
-    const looksLikeName = /\s/.test(text) && text.length >= 5 && !/\d/.test(text) && !/\b(pago|pagu[eé]|comprobante|transferencia)\b/.test(lowered);
-    if (looksLikeName) {
+    if (isProbablyName(text)) {
       st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
-      st.stage = 'quoted'; st.reminderSent = false; users.set(from, st);
-
-      await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${nextMondayDate()}. El valor del programa es ${PRECIO_BS}.` });
+      const fecha = nextMondayDate();
+      await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
       await sock.sendMessage(from, { text: 'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".' });
-      await sendPaymentQR(sock, from);
-      programReminder(sock, from);
+      await sendQR(sock, from);
+
+      st.stage = 'quoted';
+      statePerUser.set(from, st);
+
+      // Recordatorio si no responde (tras enviar el QR)
+      setTimeout(async () => {
+        const u = statePerUser.get(from);
+        if (u && Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000) {
+          await sock.sendMessage(from, { text: `Hola ${u.nombre || 'amigo'}, ¿sigues interesado en el reto? 😊` });
+        }
+      }, REMINDER_MINUTES * 60 * 1000);
       return;
     } else {
-      // aún no parece nombre → no respondemos o pedimos de forma amable
-      await sock.sendMessage(from, { text: '¿Podrías enviarme tu *nombre completo* para continuar? 🙌' });
-      programReminder(sock, from);
+      // No parece nombre → silencio
       return;
     }
   }
 
-  // 5) Fallback: no entendido → avisa al dueño y mensaje mínimo al cliente según etapa
-  await notifyOwner(sock, '🤖 Consulta no entendida', from, st.nombre, textRaw);
-  if (st.stage === 'start') {
-    await sock.sendMessage(from, { text: '¡Hola! 🙌 Escribe *hola* para comenzar.' });
-  } else if (st.stage === 'askedName') {
-    await sock.sendMessage(from, { text: 'Gracias 🙌 ¿Me confirmas tu *nombre completo*?' });
-    programReminder(sock, from);
-  } else {
-    await sock.sendMessage(from, { text: '¿Te ayudo con algo más?' });
+  // 3) PAGO (o si envía imagen/recibo)
+  const hasImage = !!m.message?.imageMessage;
+  if (hasImage || said(/pagu[eé]|comprobante|transferencia|pago/)) {
+    await sock.sendMessage(from, {
+      text:
+        '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
+        `🔗 Grupo: ${LINK_GRUPO}\n` +
+        `🎁 Bono:  ${LINK_BONO}`
+    });
+    st.stage = 'enrolled';
+    statePerUser.set(from, st);
+    return;
+  }
+
+  // 4) Fallback: duda → SOLO te notifica a ti (silencio al cliente)
+  const now = Date.now();
+  const msGap = MIN_NOTIFY_GAP_MIN * 60 * 1000;
+  const canNotify = now - (st.lastNotify || 0) > msGap;
+
+  if (canNotify) {
+    await notifyOwner(sock, from, pushName, text);
+    st.lastNotify = now;
+    statePerUser.set(from, st);
   }
 }
 
-// ------------------------- ARRANQUE BAILEYS -------------------------
 async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: false,            // Mostramos link en logs
+    browser: Browsers.appropriate('Desktop')
   });
 
-  // Mostrar QR como LINK clickeable en logs
-  sock.ev.on('connection.update', (u) => {
-    const { qr, connection } = u;
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
     if (qr) {
       const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr);
       console.log('🔗 QR directo (haz clic y escanéalo):', qrUrl);
     }
+
     if (connection === 'open') {
       console.log('✅ Conectado a WhatsApp. Escuchando mensajes...');
     }
+
     if (connection === 'close') {
-      console.log('❌ Conexión cerrada. Reintentando...');
-      start().catch(err => console.error('Reinicio falló:', err?.message));
+      const errStr = String(lastDisconnect?.error || '');
+      const isLoggedOut =
+        lastDisconnect?.error?.output?.statusCode === 401 ||
+        errStr.includes('logged out') ||
+        errStr.includes('Stream errored out');
+
+      if (isLoggedOut) {
+        console.log('⚠️ Sesión inválida. Borrando credenciales y reiniciando...');
+        try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
+      }
+
+      console.log('♻️ Reintentando en 2s...');
+      setTimeout(() => start().catch(e => console.error('Reinicio falló:', e?.message)), 2000);
     }
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Mensajes entrantes
   sock.ev.on('messages.upsert', async ({ type, messages }) => {
     if (type !== 'notify') return;
     const m = messages && messages[0];
-    try { await handleMessage(sock, m); }
-    catch (e) { console.error('Error al responder:', e?.message); }
-  });
-
-  // Reporte cada 60 minutos
-  setInterval(async () => {
-    const { talkers, paid, leftOnSeen } = computeWindowStats(60*60*1000);
-    const msg =
-`🕑 *Reporte últimos 60 min*
-• Personas que hablaron: *${talkers}*
-• Confirmados (pago): *${paid}*
-• Dejaron en visto (recordatorio enviado): *${leftOnSeen}*`;
-    try { await sock.sendMessage(OWNER_JID, { text: msg }); } catch {}
-  }, 60 * 60 * 1000);
-
-  // Reporte diario 22:00
-  setInterval(async () => {
-    const h = hourTZ(), t = todayTZ();
-    if (h === 22 && lastDailyDate !== t) {
-      const { talkers, paid, leftOnSeen } = computeDailyStats(t);
-      const msg =
-`📊 *Reporte del día (${t})*
-• Total que hablaron: *${talkers}*
-• Confirmados (pago): *${paid}*
-• Dejaron en visto: *${leftOnSeen}*`;
-      try { await sock.sendMessage(OWNER_JID, { text: msg }); } catch {}
-      lastDailyDate = t;
+    try {
+      await handleMessage(sock, m);
+    } catch (e) {
+      console.error('Error al responder:', e?.message);
     }
-  }, 60 * 1000);
+  });
 }
 
 start().catch(err => console.error('Error general:', err?.message));
