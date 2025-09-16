@@ -1,15 +1,18 @@
 {
   "name": "bot-whatsapp",
   "version": "1.0.0",
-  "description": "WhatsApp bot con WPPConnect (Railway)",
+  "description": "WhatsApp bot con Baileys (sin navegador) listo para Railway",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "author": "Sebastian Rejas",
+  "license": "MIT",
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.28.4"
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^8.17.0"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18 <23"
   }
 }
