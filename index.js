@@ -1,8 +1,7 @@
-// Bot WhatsApp sin navegador (Baileys) – listo para Railway/Render/Heroku
-// Autor: Sebas + tu copiloto :)
+// Bot WhatsApp sin navegador (Baileys) + QR como LINK en logs (Railway-friendly)
 
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode-terminal'); // opcional, también lo dejamos
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -154,7 +153,6 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
 }
 
 async function start() {
-  // Carpeta de autenticación (persistirá mientras el contenedor no se redepliegue)
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
 
@@ -162,16 +160,21 @@ async function start() {
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: false // mostramos link en vez de QR ASCII
   });
 
-  // QR en ASCII en los logs (para Railway)
   sock.ev.on('connection.update', (update) => {
-    const { qr, connection, lastDisconnect } = update;
+    const { qr, connection } = update;
+
     if (qr) {
-      console.log('📲 Escanea este QR en WhatsApp > Dispositivos vinculados:');
-      qrcode.generate(qr, { small: true });
+      // 1) ASCII por si quieres (no necesario)
+      // qrcode.generate(qr, { small: true });
+
+      // 2) MOSTRAR LINK DIRECTO A PNG (lo importante)
+      const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr);
+      console.log('🔗 QR directo (haz clic y escanéalo):', qrUrl);
     }
+
     if (connection === 'open') {
       console.log('✅ Conectado a WhatsApp. Escuchando mensajes...');
     }
@@ -183,7 +186,6 @@ async function start() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Mensajes entrantes
   sock.ev.on('messages.upsert', async ({ type, messages }) => {
     if (type !== 'notify') return;
     const m = messages && messages[0];
