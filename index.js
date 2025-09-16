@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURA AQUÍ ==========
-const OWNER_PHONE = '59170000000'; // <-- TU número con código de país, solo dígitos (p.ej. 5917XXXXXXXX)
+const OWNER_PHONE = '59177441414'; // <-- TU número con código de país, solo dígitos (p.ej. 5917XXXXXXXX)
 const LINK_GRUPO   = 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
 const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
 const LINK_PAGO    = 'https://tu-link-de-pago'; // fallback si no hay imagen
@@ -236,3 +236,4 @@ async function start() {
 }
 
 start().catch(err => console.error('Error general:', err));
+
