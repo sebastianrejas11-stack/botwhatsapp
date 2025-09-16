@@ -1,0 +1,15 @@
+{
+  "name": "bot-whatsapp",
+  "version": "1.0.0",
+  "description": "Bot de WhatsApp con WPPConnect desplegado en Render",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Sebastian Rejas",
+  "license": "MIT",
+  "dependencies": {
+    "@wppconnect-team/wppconnect": "^1.0.0",
+    "axios": "^1.6.0"
+  }
+}
