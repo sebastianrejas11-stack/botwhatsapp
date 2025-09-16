@@ -15,8 +15,8 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURA AQUÍ ==========
-const OWNER_PHONE = process.env.OWNER_PHONE || '59170000000'; // Sólo dígitos con código de país
-const LINK_GRUPO   = process.env.LINK_GRUPO || 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
+const OWNER_PHONE = process.env.OWNER_PHONE || '59177441414'; // Sólo dígitos con código de país
+const LINK_GRUPO   = process.env.LINK_GRUPO || 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
 const LINK_BONO    = process.env.LINK_BONO  || 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
 const LINK_PAGO    = process.env.LINK_PAGO  || 'https://tu-link-de-pago'; // fallback si no hay imagen
 const REMINDER_MINUTES   = parseInt(process.env.REMINDER_MINUTES || '10', 10);
@@ -246,3 +246,4 @@ async function start() {
 }
 
 start().catch(err => console.error('Error general:', err));
+
