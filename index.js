@@ -1,31 +1,28 @@
 // Bot WhatsApp (Baileys) para Railway
-// - QR como link clickeable en logs
-// - Persistencia de sesión en AUTH_DIR (por defecto ./auth)
-// - Si la sesión se corrompe, se borra y vuelve a pedir QR
+// - Sin Chromium (NO puppeteer)
+// - QR como link clickeable en logs (api.qrserver.com)
+// - Persistencia de sesión en ./auth (si no usas Volumes, la sesión se pierde al redeploy)
 // - Flujo: saludo -> nombre -> QR -> recordatorio
-// - Si no entiende: NO responde al cliente; te notifica por WhatsApp
+// - Si no entiende: NO responde al cliente; te notifica a ti por WhatsApp
 
 const {
   default: makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  Browsers
+  fetchLatestBaileysVersion
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
 
-// ====== CONFIGURA AQUÍ ======
-const OWNER_PHONE = '59170000000'; // <-- TU número con código de país, solo dígitos
-const LINK_GRUPO   = 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
-const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
-const LINK_PAGO    = 'https://tu-link-de-pago'; // fallback si no hay imagen
-const REMINDER_MINUTES   = 10; // recordatorio al cliente si no responde tras enviarle el QR
-const MIN_NOTIFY_GAP_MIN = 5;  // no notificarte más de 1 vez/5 min por cada cliente
-// ============================
+// ========== CONFIGURA AQUÍ ==========
+const OWNER_PHONE = process.env.OWNER_PHONE || '59170000000'; // Sólo dígitos con código de país
+const LINK_GRUPO   = process.env.LINK_GRUPO || 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
+const LINK_BONO    = process.env.LINK_BONO  || 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
+const LINK_PAGO    = process.env.LINK_PAGO  || 'https://tu-link-de-pago'; // fallback si no hay imagen
+const REMINDER_MINUTES   = parseInt(process.env.REMINDER_MINUTES || '10', 10);
+const MIN_NOTIFY_GAP_MIN = parseInt(process.env.MIN_NOTIFY_GAP_MIN || '5', 10);
+// ====================================
 
-// Carpeta de sesión (puedes fijarla con env var AUTH_DIR en Railway)
-const AUTH_DIR = process.env.AUTH_DIR || './auth';
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
 // Memoria simple por contacto (RAM del server)
@@ -61,7 +58,10 @@ function isProbablyName(s) {
   if (parts.length < 2) return false;
   if (parts.some(p => p.length < 2)) return false;
   const lowered = s.toLowerCase();
-  const badStarts = ['me ', 'puedes ', 'quiero ', 'como ', 'cómo ', 'que ', 'qué ', 'donde ', 'dónde ', 'cuando ', 'cuándo ', 'por que ', 'por qué ', 'porque '];
+  const badStarts = [
+    'me ', 'puedes ', 'quiero ', 'como ', 'cómo ', 'que ', 'qué ',
+    'donde ', 'dónde ', 'cuando ', 'cuándo ', 'por que ', 'por qué ', 'porque '
+  ];
   if (badStarts.some(b => lowered.startsWith(b))) return false;
   if (s.length > 60) return false;
   return true;
@@ -168,7 +168,7 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
       }, REMINDER_MINUTES * 60 * 1000);
       return;
     } else {
-      // No parece nombre → silencio
+      // No parece nombre → silencio (y te consultará por privado si corresponde)
       return;
     }
   }
@@ -176,18 +176,21 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
   // 3) PAGO (o si envía imagen/recibo)
   const hasImage = !!m.message?.imageMessage;
   if (hasImage || said(/pagu[eé]|comprobante|transferencia|pago/)) {
-    await sock.sendMessage(from, {
-      text:
-        '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
-        `🔗 Grupo: ${LINK_GRUPO}\n` +
-        `🎁 Bono:  ${LINK_BONO}`
-    });
+    await sock.sendMessage(
+      from,
+      {
+        text:
+          '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
+          `🔗 Grupo: ${LINK_GRUPO}\n` +
+          `🎁 Bono:  ${LINK_BONO}`
+      }
+    );
     st.stage = 'enrolled';
     statePerUser.set(from, st);
     return;
   }
 
-  // 4) Fallback: duda → SOLO te notifica a ti (silencio al cliente)
+  // 4) Fallback: duda → SOLO te notifica a ti (el bot guarda silencio al cliente)
   const now = Date.now();
   const msGap = MIN_NOTIFY_GAP_MIN * 60 * 1000;
   const canNotify = now - (st.lastNotify || 0) > msGap;
@@ -197,22 +200,23 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
     st.lastNotify = now;
     statePerUser.set(from, st);
   }
+  // Silencio al cliente
 }
 
 async function start() {
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  // Ruta de sesión: ./auth  (si no usas Volume, se perderá al redeploy)
+  const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,            // Mostramos link en logs
-    browser: Browsers.appropriate('Desktop')
+    printQRInTerminal: false // mostraremos link en logs
   });
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  sock.ev.on('connection.update', (update) => {
+    const { qr, connection } = update;
 
     if (qr) {
       const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr);
@@ -222,21 +226,9 @@ async function start() {
     if (connection === 'open') {
       console.log('✅ Conectado a WhatsApp. Escuchando mensajes...');
     }
-
     if (connection === 'close') {
-      const errStr = String(lastDisconnect?.error || '');
-      const isLoggedOut =
-        lastDisconnect?.error?.output?.statusCode === 401 ||
-        errStr.includes('logged out') ||
-        errStr.includes('Stream errored out');
-
-      if (isLoggedOut) {
-        console.log('⚠️ Sesión inválida. Borrando credenciales y reiniciando...');
-        try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
-      }
-
-      console.log('♻️ Reintentando en 2s...');
-      setTimeout(() => start().catch(e => console.error('Reinicio falló:', e?.message)), 2000);
+      console.log('❌ Conexión cerrada. Reintentando...');
+      start().catch(err => console.error('Reinicio falló:', err.message));
     }
   });
 
@@ -253,4 +245,4 @@ async function start() {
   });
 }
 
-start().catch(err => console.error('Error general:', err?.message));
+start().catch(err => console.error('Error general:', err));
