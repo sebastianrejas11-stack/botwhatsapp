@@ -8,9 +8,6 @@
   },
   "author": "Sebastian Rejas",
   "license": "MIT",
-  "engines": {
-    "node": ">=18 <23"
-  },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.9",
     "pino": "^8.17.0"
