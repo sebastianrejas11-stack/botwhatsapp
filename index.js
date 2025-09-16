@@ -1,4 +1,8 @@
-// Bot WhatsApp sin navegador (Baileys) + QR como LINK + Aviso al dueño en dudas
+// Bot WhatsApp (Baileys) para Railway
+// - QR como link clickeable en logs
+// - Persistencia de sesión en ./auth (monta Volume en /app/auth)
+// - Flujo: saludo -> nombre -> QR -> recordatorio
+// - Si no entiende: NO responde al cliente; te notifica a ti por WhatsApp
 
 const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const pino = require('pino');
@@ -6,12 +10,12 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURA AQUÍ ==========
-const OWNER_PHONE = '59170000000'; // <-- TU número con código de país, solo dígitos. Ej: Bolivia 5917XXXXXXXX
+const OWNER_PHONE = '59170000000'; // <-- TU número con código de país, solo dígitos (p.ej. 5917XXXXXXXX)
 const LINK_GRUPO   = 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
 const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
 const LINK_PAGO    = 'https://tu-link-de-pago'; // fallback si no hay imagen
-const REMINDER_MINUTES = 10; // recordatorio al cliente si no responde
-const MIN_NOTIFY_GAP_MIN = 5; // no notificarte más de 1 vez/5 min por cada cliente
+const REMINDER_MINUTES   = 10; // recordatorio al cliente si no responde tras enviarle el QR
+const MIN_NOTIFY_GAP_MIN = 5;  // no notificarte más de 1 vez/5 min por cada cliente
 // ====================================
 
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
@@ -41,6 +45,20 @@ function extractText(m) {
   ).trim();
 }
 
+// ¿Parece un nombre real?
+function isProbablyName(s) {
+  if (/[?¿!¡]/.test(s)) return false;
+  if (!/^[\p{L} .'\-]+$/u.test(s)) return false;
+  const parts = s.trim().split(/\s+/);
+  if (parts.length < 2) return false;
+  if (parts.some(p => p.length < 2)) return false;
+  const lowered = s.toLowerCase();
+  const badStarts = ['me ', 'puedes ', 'quiero ', 'como ', 'cómo ', 'que ', 'qué ', 'donde ', 'dónde ', 'cuando ', 'cuándo ', 'por que ', 'por qué ', 'porque '];
+  if (badStarts.some(b => lowered.startsWith(b))) return false;
+  if (s.length > 60) return false;
+  return true;
+}
+
 // Enviar imagen (qr.jpg en la misma carpeta)
 async function sendQR(sock, to) {
   try {
@@ -53,15 +71,14 @@ async function sendQR(sock, to) {
   }
 }
 
-// Notificar al dueño (tú) cuando el bot no entiende
+// Notificar al dueño (tú) cuando el bot no entiende (sin decir nada al cliente)
 async function notifyOwner(sock, customerJid, customerName, msgText) {
   const human = customerJid.replace('@s.whatsapp.net', '');
   const nombre = customerName ? ` (${customerName})` : '';
   const body =
     `🤖 *Duda detectada*\n` +
     `De: *${human}*${nombre}\n` +
-    `Mensaje: "${msgText}"\n\n` +
-    `Responde tú si es necesario.`;
+    `Mensaje: "${msgText}"`;
   try {
     await sock.sendMessage(OWNER_JID, { text: body });
   } catch (e) {
@@ -69,7 +86,7 @@ async function notifyOwner(sock, customerJid, customerName, msgText) {
   }
 }
 
-// Lógica del bot (intents básicos)
+// Lógica del bot
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
   if (!from || from.endsWith('@g.us')) return; // Ignora grupos
@@ -79,8 +96,7 @@ async function handleMessage(sock, m) {
 
   const text = textRaw.replace(/\s+/g, ' ');
   const lowered = text.toLowerCase();
-
-  const pushName = m.pushName || ''; // Nombre que WhatsApp reporta
+  const pushName = m.pushName || '';
 
   let st = statePerUser.get(from) || { stage: 'start', nombre: '', lastMsg: 0, lastNotify: 0 };
   st.lastMsg = Date.now();
@@ -123,10 +139,9 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
     return;
   }
 
-  // 2) NOMBRE (2+ palabras y no suena a pago)
-  const looksLikeName = text.split(' ').length >= 2 && !said(/pagu[eé]|comprobante|transferencia|pago/);
-  if (st.stage === 'askedName' || looksLikeName) {
-    if (looksLikeName) {
+  // 2) NOMBRE → SOLO si antes se pidió nombre y además cumple patrón
+  if (st.stage === 'askedName') {
+    if (isProbablyName(text)) {
       st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
       const fecha = nextMondayDate();
       await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
@@ -136,7 +151,7 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
       st.stage = 'quoted';
       statePerUser.set(from, st);
 
-      // Recordatorio si no responde
+      // Recordatorio si no responde (tras enviar el QR)
       setTimeout(async () => {
         const u = statePerUser.get(from);
         if (u && Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000) {
@@ -145,7 +160,7 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
       }, REMINDER_MINUTES * 60 * 1000);
       return;
     } else {
-      await sock.sendMessage(from, { text: '¿Podrías escribirme tu *nombre completo* para continuar? 🙌' });
+      // No parece nombre → no lo tratamos como tal (silencio)
       return;
     }
   }
@@ -164,7 +179,7 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
     return;
   }
 
-  // 4) Fallback: no entendido → avisar al dueño (con anti-spam)
+  // 4) Fallback: duda → SOLO te notifica a ti (el bot guarda silencio al cliente)
   const now = Date.now();
   const msGap = MIN_NOTIFY_GAP_MIN * 60 * 1000;
   const canNotify = now - (st.lastNotify || 0) > msGap;
@@ -174,11 +189,11 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
     st.lastNotify = now;
     statePerUser.set(from, st);
   }
-
-  await sock.sendMessage(from, { text: 'Te entiendo. Para darte la mejor respuesta, ya pedí ayuda a un asesor humano 👨‍💼. ¡Te escribimos en breve!' });
+  // No enviamos nada al cliente aquí (silencio)
 }
 
 async function start() {
+  // Ruta de sesión: ./auth  (en Railway monta un Volume en /app/auth)
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
 
@@ -193,7 +208,7 @@ async function start() {
     const { qr, connection } = update;
 
     if (qr) {
-      // Mostrar link directo a PNG del QR (clic y escanear)
+      // Link directo a PNG del QR (clic y escanear)
       const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr);
       console.log('🔗 QR directo (haz clic y escanéalo):', qrUrl);
     }
