@@ -1,9 +1,10 @@
 // Bot WhatsApp (Baileys) para Railway
-// - Sin Chromium (NO puppeteer)
+// - Sin Chromium
 // - QR como link clickeable en logs (api.qrserver.com)
-// - Persistencia de sesión en ./auth (si no usas Volumes, la sesión se pierde al redeploy)
+// - Persistencia de sesión en ./auth (si no usas Volumes, se pierde al redeploy)
 // - Flujo: saludo -> nombre -> QR -> recordatorio
 // - Si no entiende: NO responde al cliente; te notifica a ti por WhatsApp
+// - NUEVO: notifica pago SIEMPRE; dudas sin enfriamiento por defecto
 
 const {
   default: makeWASocket,
@@ -15,23 +16,30 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIGURA AQUÍ ==========
-const OWNER_PHONE = process.env.OWNER_PHONE || '59177441414'; // Sólo dígitos con código de país
-const LINK_GRUPO   = process.env.LINK_GRUPO || 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
+// Tu número con código de país, solo dígitos:
+const OWNER_PHONE = process.env.OWNER_PHONE || '59177441414';
+
+const LINK_GRUPO   = process.env.LINK_GRUPO || 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr?mode=ems_copy_t';
 const LINK_BONO    = process.env.LINK_BONO  || 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
-const LINK_PAGO    = process.env.LINK_PAGO  || 'https://tu-link-de-pago'; // fallback si no hay imagen
-const REMINDER_MINUTES   = parseInt(process.env.REMINDER_MINUTES || '10', 10);
-const MIN_NOTIFY_GAP_MIN = parseInt(process.env.MIN_NOTIFY_GAP_MIN || '5', 10);
+const LINK_PAGO    = process.env.LINK_PAGO  || 'https://tu-link-de-pago';
+
+// Recordatorio al cliente si no responde tras enviar el QR
+const REMINDER_MINUTES = parseFloat(process.env.REMINDER_MINUTES || '10');
+
+// ⬇️ Antispam de dudas (en segundos). 0 = sin enfriamiento (notifica TODO).
+// Si prefieres un pequeño freno, por ejemplo 10 segundos: pon 10.
+const DOUBT_NOTIFY_COOLDOWN_SEC = parseFloat(process.env.DOUBT_NOTIFY_COOLDOWN_SEC || '0');
 // ====================================
 
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
-// Memoria simple por contacto (RAM del server)
+// Memoria simple por contacto (RAM)
 const statePerUser = new Map();
 
 // Próximo lunes (“22 de septiembre”)
 function nextMondayDate() {
   const now = new Date();
-  const day = now.getDay(); // 0=Dom,1=Lun,...
+  const day = now.getDay(); // 0=Dom
   const daysToMon = (8 - day) % 7 || 7;
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMon);
   return d.toLocaleDateString('es-BO', { day: 'numeric', month: 'long' });
@@ -67,31 +75,38 @@ function isProbablyName(s) {
   return true;
 }
 
-// Enviar imagen (qr.jpg en la misma carpeta)
+// Enviar imagen (qr.jpg en la misma carpeta). Si falta, manda LINK_PAGO
 async function sendQR(sock, to) {
   try {
     const file = path.join(__dirname, 'qr.jpg');
     const buffer = fs.readFileSync(file);
     await sock.sendMessage(to, { image: buffer, caption: 'Escanea este QR para inscribirte ✅' });
   } catch (e) {
-    console.error('Error enviando QR:', e?.message);
     await sock.sendMessage(to, { text: `No pude adjuntar el QR ahora. Aquí tienes el enlace de pago: ${LINK_PAGO}` });
   }
 }
 
-// Notificar al dueño (tú) cuando el bot no entiende (sin decir nada al cliente)
-async function notifyOwner(sock, customerJid, customerName, msgText) {
+// Notificar duda al dueño
+async function notifyDoubt(sock, customerJid, customerName, msgText) {
   const human = customerJid.replace('@s.whatsapp.net', '');
   const nombre = customerName ? ` (${customerName})` : '';
   const body =
     `🤖 *Duda detectada*\n` +
     `De: *${human}*${nombre}\n` +
     `Mensaje: "${msgText}"`;
-  try {
-    await sock.sendMessage(OWNER_JID, { text: body });
-  } catch (e) {
-    console.error('No pude notificar al dueño:', e?.message);
-  }
+  await sock.sendMessage(OWNER_JID, { text: body }).catch(() => {});
+}
+
+// Notificar posible pago/comprobante al dueño (no se bloquea por cooldown)
+async function notifyPayment(sock, customerJid, msgText, hasImage) {
+  const human = customerJid.replace('@s.whatsapp.net', '');
+  const detalle = hasImage ? '(Imagen/Comprobante adjunto)' : `"${msgText}"`;
+  const body =
+    `💸 *Posible pago/confirmación*\n` +
+    `De: *${human}*\n` +
+    `Detalle: ${detalle}\n\n` +
+    `👉 *Acción sugerida:* CONFIRMA EL PAGO DE XXXXXX`;
+  await sock.sendMessage(OWNER_JID, { text: body }).catch(() => {});
 }
 
 // Lógica del bot
@@ -100,19 +115,23 @@ async function handleMessage(sock, m) {
   if (!from || from.endsWith('@g.us')) return; // Ignora grupos
 
   const textRaw = extractText(m);
-  if (!textRaw) return;
-
-  const text = textRaw.replace(/\s+/g, ' ');
-  const lowered = text.toLowerCase();
+  const text = textRaw ? textRaw.replace(/\s+/g, ' ') : '';
+  const lowered = (text || '').toLowerCase();
   const pushName = m.pushName || '';
+  const hasImage = !!m.message?.imageMessage || !!m.message?.documentMessage; // doc por si envía PDF
 
-  let st = statePerUser.get(from) || { stage: 'start', nombre: '', lastMsg: 0, lastNotify: 0 };
+  let st = statePerUser.get(from) || {
+    stage: 'start',
+    nombre: '',
+    lastMsg: 0,
+    lastDoubtNotifyAt: 0
+  };
   st.lastMsg = Date.now();
   statePerUser.set(from, st);
 
   const said = (re) => re.test(lowered);
 
-  // Comandos útiles
+  // Comandos
   if (said(/^ping$/i)) {
     await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
     return;
@@ -147,9 +166,9 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
     return;
   }
 
-  // 2) NOMBRE → SOLO si antes se pidió nombre y además cumple patrón
+  // 2) NOMBRE
   if (st.stage === 'askedName') {
-    if (isProbablyName(text)) {
+    if (text && isProbablyName(text)) {
       st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
       const fecha = nextMondayDate();
       await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
@@ -159,7 +178,7 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
       st.stage = 'quoted';
       statePerUser.set(from, st);
 
-      // Recordatorio si no responde (tras enviar el QR)
+      // Recordatorio si no responde
       setTimeout(async () => {
         const u = statePerUser.get(from);
         if (u && Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000) {
@@ -168,43 +187,43 @@ Si deseas inscribirte, por favor responde a este mensaje con tu nombre completo 
       }, REMINDER_MINUTES * 60 * 1000);
       return;
     } else {
-      // No parece nombre → silencio (y te consultará por privado si corresponde)
+      // No parece nombre → silencio
       return;
     }
   }
 
-  // 3) PAGO (o si envía imagen/recibo)
-  const hasImage = !!m.message?.imageMessage;
+  // 3) PAGO / COMPROBANTE
   if (hasImage || said(/pagu[eé]|comprobante|transferencia|pago/)) {
-    await sock.sendMessage(
-      from,
-      {
-        text:
-          '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
-          `🔗 Grupo: ${LINK_GRUPO}\n` +
-          `🎁 Bono:  ${LINK_BONO}`
-      }
-    );
+    // Notifica SIEMPRE al dueño (sin cooldown)
+    await notifyPayment(sock, from, text || '', hasImage);
+
+    // Respuesta al cliente
+    await sock.sendMessage(from, {
+      text:
+        '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
+        `🔗 Grupo: ${LINK_GRUPO}\n` +
+        `🎁 Bono:  ${LINK_BONO}`
+    });
+
     st.stage = 'enrolled';
     statePerUser.set(from, st);
     return;
   }
 
-  // 4) Fallback: duda → SOLO te notifica a ti (el bot guarda silencio al cliente)
+  // 4) Duda / Fallback → te notifica (con cooldown en segundos, 0 = sin cooldown)
   const now = Date.now();
-  const msGap = MIN_NOTIFY_GAP_MIN * 60 * 1000;
-  const canNotify = now - (st.lastNotify || 0) > msGap;
+  const gap = DOUBT_NOTIFY_COOLDOWN_SEC * 1000;
+  const canNotify = !gap || (now - (st.lastDoubtNotifyAt || 0) >= gap);
 
-  if (canNotify) {
-    await notifyOwner(sock, from, pushName, text);
-    st.lastNotify = now;
+  if (text && canNotify) {
+    await notifyDoubt(sock, from, pushName, text);
+    st.lastDoubtNotifyAt = now;
     statePerUser.set(from, st);
   }
-  // Silencio al cliente
+  // El bot no contesta al cliente
 }
 
 async function start() {
-  // Ruta de sesión: ./auth  (si no usas Volume, se perderá al redeploy)
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
 
@@ -212,7 +231,7 @@ async function start() {
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false // mostraremos link en logs
+    printQRInTerminal: false
   });
 
   sock.ev.on('connection.update', (update) => {
@@ -246,4 +265,3 @@ async function start() {
 }
 
 start().catch(err => console.error('Error general:', err));
-
