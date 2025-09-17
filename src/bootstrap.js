@@ -8,21 +8,21 @@ const {
 } = require("@whiskeysockets/baileys");
 const { onMessage } = require("./handlers");
 
-// ⚠️ Para replicar EXACTO tu index viejo, usamos ./auth relativo al cwd
-const AUTH_DIR = path.resolve(process.cwd(), "auth");
+// 🔸 Si hay volumen montado, usaremos /data; si no, cae a la carpeta del repo
+const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd());
+const AUTH_DIR = path.join(DATA_DIR, "auth");
 let lastQR = "";
 
 async function connectToWhatsApp() {
-  // Si pones RESET_AUTH=1 en Variables de Railway, fuerza QR nuevo
-  if (process.env.RESET_AUTH === "1" || process.env.RESET_AUTH === "true") {
-    try {
-      fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-      console.log("🧹 Auth borrado. Se generará un nuevo QR.");
-    } catch (e) {
-      console.log("No se pudo borrar auth:", e?.message);
-    }
-  }
+  // crea carpeta si no existe
   if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+  // reset opcional (solo cuando tú lo pongas en Variables)
+  if (process.env.RESET_AUTH === "1" || process.env.RESET_AUTH === "true") {
+    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+    console.log("🧹 Auth borrado. Se generará un nuevo QR.");
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
@@ -31,47 +31,31 @@ async function connectToWhatsApp() {
     version,
     auth: state,
     logger: pino({ level: "silent" }),
-    printQRInTerminal: false, // como tu index viejo
+    printQRInTerminal: false,
+    browser: ["WARSONX Bot", "Railway", "1.0"], // nombre legible en 'Dispositivos vinculados'
   });
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", (update) => {
     const { qr, connection } = update;
-
-    // Igual que antes, pero QR más grande y sin caché
     if (qr && qr !== lastQR) {
       lastQR = qr;
-      const url =
-        "https://api.qrserver.com/v1/create-qr-code/?size=512x512&margin=1&data=" +
-        encodeURIComponent(qr) +
-        "&t=" +
-        Date.now();
-      console.log("🔗 QR directo (clic y escanear):", url);
+      const url = "https://api.qrserver.com/v1/create-qr-code/?size=512x512&margin=1&data="
+        + encodeURIComponent(qr) + "&t=" + Date.now();
+      console.log("🔗 QR directo (ábrelo y escanéalo de inmediato):", url);
     }
-
-    if (connection === "open") {
-      console.log("✅ Conectado a WhatsApp. Escuchando mensajes...");
-    }
-
+    if (connection === "open") console.log("✅ Conectado a WhatsApp. Escuchando mensajes...");
     if (connection === "close") {
       console.log("❌ Conexión cerrada. Reintentando...");
-      setTimeout(() => {
-        connectToWhatsApp().catch((err) =>
-          console.error("Reinicio falló:", err?.message)
-        );
-      }, 1500);
+      setTimeout(() => connectToWhatsApp().catch(e => console.error("Reinicio falló:", e?.message)), 1500);
     }
   });
 
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (type !== "notify") return;
     for (const m of messages) {
-      try {
-        await onMessage(sock, m);
-      } catch (e) {
-        console.error("Error al responder:", e?.message);
-      }
+      try { await onMessage(sock, m); } catch (e) { console.error("Error al responder:", e?.message); }
     }
   });
 
