@@ -14,7 +14,7 @@ const path = require('path');
 // ========== CONFIG EDITABLE ==========
 const OWNER_PHONE = '59177441414';             // <- tu celular (solo dígitos con código de país)
 const COUNTRY_PREFIX = '591';                   // <- prefijo permitido
-const LINK_GRUPO   = 'https://chat.whatsapp.com/FahDpskFeuf7rqUVz7lgYr';
+const LINK_GRUPO   = 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
 const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc';
 const LINK_PAGO    = 'https://tu-link-de-pago';
 const REMINDER_MINUTES = 10;                    // recordatorio si no responde
@@ -311,3 +311,4 @@ async function start() {
 }
 
 start().catch(err => console.error('Error general:', err));
+
