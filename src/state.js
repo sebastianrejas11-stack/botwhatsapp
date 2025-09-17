@@ -2,38 +2,46 @@
 const fs = require("fs");
 const path = require("path");
 
-// Usar /data si está montado, o el directorio actual como fallback
-const DATA_DIR = process.env.DATA_DIR || ".";
+// Usa /data si está montado; si no, la carpeta actual
+const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd());
+
+// Crea la carpeta si no existe (no falla si ya existe)
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
-// Cargar usuarios desde archivo (si existe)
+// Carga segura
 let users = {};
-if (fs.existsSync(DB_FILE)) {
+try {
+  if (fs.existsSync(DB_FILE)) {
+    const raw = fs.readFileSync(DB_FILE, "utf8") || "{}";
+    users = JSON.parse(raw);
+  } else {
+    fs.writeFileSync(DB_FILE, "{}");
+  }
+} catch (e) {
+  console.error("DB load error:", e?.message);
+  users = {};
+}
+
+// Guarda segura
+function save() {
   try {
-    users = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-  } catch {
-    users = {};
+    fs.writeFileSync(DB_FILE, JSON.stringify(users, null, 2));
+  } catch (e) {
+    console.error("DB write error:", e?.message);
   }
 }
 
-// Guardar usuarios en el archivo
-function saveUsers() {
-  fs.writeFileSync(DB_FILE, JSON.stringify(users, null, 2));
-}
-
-// Obtener un usuario
 function getUser(jid) {
   return users[jid];
 }
 
-// Crear/actualizar un usuario
 function upsertUser(jid, data) {
   users[jid] = { ...users[jid], ...data };
-  saveUsers();
+  save();
   return users[jid];
 }
 
-module.exports = {
-  getUser,
-  upsertUser,
-};
+module.exports = { getUser, upsertUser };
+
