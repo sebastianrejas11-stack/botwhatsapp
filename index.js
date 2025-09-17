@@ -3,10 +3,15 @@
 // - Ignora mensajes viejos (previos al arranque) para evitar re-spam
 // - Solo trabaja con contactos que escriban desde que el bot está encendido
 // - Bloquea números que no sean de +591 (te avisa a ti, no les responde)
-// - Flujo: saludo -> nombre completo -> QR -> 1 recordatorio
+// - Flujo: saludo -> nombre completo -> QR -> 1 recordatorio si no responde
 // - Reportes: cada 60 min y resumen diario a las 22:00 (hora del server)
+// - Pago/comprobante: envía tu mensaje premium y te notifica
 
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion
+} = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
@@ -14,18 +19,52 @@ const path = require('path');
 // ========== CONFIG EDITABLE ==========
 const OWNER_PHONE = '59177441414';             // <- tu celular (solo dígitos con código de país)
 const COUNTRY_PREFIX = '591';                   // <- prefijo permitido
-const LINK_GRUPO   = 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
-const LINK_BONO    = 'https://www.youtube.com/watch?v=XkjFZY30vHc';
-const LINK_PAGO    = 'https://tu-link-de-pago';
+const LINK_PAGO = 'https://tu-link-de-pago';    // fallback si no hay qr.jpg
 const REMINDER_MINUTES = 10;                    // recordatorio si no responde
 const REPORT_EVERY_MIN = 60;                    // reporte cada 60 minutos
 // =====================================
 
+// Mensaje premium al detectar pago/comprobante
+const MENSAJE_PAGO = `🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
+
+Prepárate para iniciar un viaje transformador hacia una vida más plena, consciente y conectada con la energía de la gratitud y la abundancia 💖✨
+
+🔗 Ingresa al grupo aquí:
+https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t
+
+🎁 BONO ESPECIAL POR INSCRIBIRTE
+Al unirte, también recibes totalmente gratis el taller de 12 clases para aprender a meditar, ideal para profundizar en tu bienestar y armonía interior 🧘‍♀️🌿
+
+📺 Accede al taller aquí:
+https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1
+
+✨ ¡Gracias por ser parte de este hermoso camino! Nos vemos dentro.`;
+
+// Bienvenida y pedido de nombre completo
+function buildBienvenida() {
+  const fecha = nextMondayDate();
+  return (
+`Hola 🌟 ¡Gracias por tu interés en el Reto de 21 Días de Gratitud y Abundancia! 🙏✨
+
+Este hermoso reto se realizará por WhatsApp y empieza este lunes ${fecha} 🗓️
+
+📌 Incluye:
+✔️ Reflexión + ejercicio diario
+✔️ Videos explicativos
+✔️ Libro digital al finalizar
+
+💛 Este es un bonito regalo para ti, date la oportunidad.
+
+Las clases se envían vía WhatsApp por la mañana y puedes verlas cuando gustes.
+
+Si deseas inscribirte, por favor respóndeme tu *nombre completo (nombre y apellido)* ✅`);
+}
+
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
 // Guardas de tiempo para NO reprocesar historial
-const START_EPOCH = Math.floor(Date.now() / 1000);     // timestamp en segundos del arranque
-const HISTORY_GRACE_SEC = 30;                          // margen de seguridad para desfases
+const START_EPOCH = Math.floor(Date.now() / 1000); // timestamp en segundos del arranque
+const HISTORY_GRACE_SEC = 30;                      // margen de seguridad
 
 // Estado en memoria por usuario
 const users = new Map(); // { stage, nombre, lastMsg, reminderSent, paid, firstSeenAt }
@@ -47,7 +86,7 @@ function nextMondayDate() {
   return d.toLocaleDateString('es-BO', { day: 'numeric', month: 'long' });
 }
 
-// Extraer texto
+// Extraer texto útil
 function extractText(m) {
   if (!m || !m.message) return '';
   const msg = m.message;
@@ -56,18 +95,20 @@ function extractText(m) {
     msg.extendedTextMessage?.text ||
     msg.imageMessage?.caption ||
     msg.videoMessage?.caption ||
+    msg.documentMessage?.caption ||
     ''
   ).trim();
 }
 
 // ¿Nombre y apellido?
 function isFullName(s) {
+  if (!s) return false;
   if (!/^[\p{L} .'\-]+$/u.test(s)) return false;
   const parts = s.trim().split(/\s+/);
   return parts.length >= 2;
 }
 
-// Enviar QR (como imagen si existe qr.jpg; si no, link)
+// Enviar QR (imagen qr.jpg si existe; si no, LINK_PAGO)
 async function sendQR(sock, to) {
   try {
     const file = path.join(__dirname, 'qr.jpg');
@@ -82,7 +123,7 @@ async function sendQR(sock, to) {
   }
 }
 
-// Notificar al dueño
+// Notificar al dueño (tú)
 async function notifyOwner(sock, customerJid, title, body) {
   if (customerJid === OWNER_JID) return;
   const human = customerJid.replace('@s.whatsapp.net', '');
@@ -108,7 +149,7 @@ async function handleMessage(sock, m) {
   }
 
   const textRaw = extractText(m);
-  const text = textRaw.replace(/\s+/g, ' ');
+  const text = (textRaw || '').replace(/\s+/g, ' ').trim();
   const lowered = text.toLowerCase();
 
   // 3) Tomar/crear estado SOLO cuando entra el primer mensaje (nuevo contacto)
@@ -123,7 +164,7 @@ async function handleMessage(sock, m) {
 
   const said = (re) => re.test(lowered);
 
-  // Comandos útiles (solo si los escriben)
+  // Comandos útiles
   if (said(/^ping$/i)) {
     await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
     return;
@@ -136,23 +177,7 @@ async function handleMessage(sock, m) {
 
   // 4) Flujo de bienvenida
   if (said(/\b(hola|buen dia|buen día|buenas)\b/i)) {
-    const fecha = nextMondayDate();
-    const bienvenida =
-`Hola 🌟 ¡Gracias por tu interés en el Reto de 21 Días de Gratitud y Abundancia! 🙏✨
-
-Este hermoso reto se realizará por WhatsApp y empieza este lunes ${fecha} 🗓️
-
-📌 Incluye:
-✔️ Reflexión + ejercicio diario
-✔️ Videos explicativos
-✔️ Libro digital al finalizar
-
-💛 Este es un bonito regalo para ti, date la oportunidad.
-
-Las clases se envían vía WhatsApp por la mañana y puedes verlas cuando gustes.
-
-Si deseas inscribirte, por favor respóndeme tu *nombre completo (nombre y apellido)* ✅`;
-    await sock.sendMessage(from, { text: bienvenida });
+    await sock.sendMessage(from, { text: buildBienvenida() });
     st.stage = 'askedName';
     users.set(from, st);
     return;
@@ -160,6 +185,11 @@ Si deseas inscribirte, por favor respóndeme tu *nombre completo (nombre y apell
 
   // 5) Nombre completo
   if (st.stage === 'askedName') {
+    const parts = text.split(/\s+/).filter(Boolean);
+    if (parts.length < 2) {
+      await sock.sendMessage(from, { text: '🙏 Por favor envíame tu *nombre completo* (nombre y apellido).' });
+      return;
+    }
     if (isFullName(text)) {
       st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
       const fecha = nextMondayDate();
@@ -184,42 +214,44 @@ Si deseas inscribirte, por favor respóndeme tu *nombre completo (nombre y apell
       }, REMINDER_MINUTES * 60 * 1000);
       return;
     } else {
-      await sock.sendMessage(from, { text: '🙏 Por favor envíame tu *nombre completo* (nombre y apellido).' });
+      await sock.sendMessage(from, { text: '🙏 Para continuar, envíame tu *nombre completo* (nombre y apellido).' });
       return;
     }
   }
 
-  // 6) Pago / comprobante
+  // 6) Pago / comprobante (imagen o texto clave)
   const hasImage = !!m.message?.imageMessage;
-  if (hasImage || said(/pagu[eé]|comprobante|transferencia|pago/)) {
-    await sock.sendMessage(from, {
-      text:
-        '🌟 ¡Bienvenido al Reto de 21 Días de Gratitud y Abundancia! 🌟\n\n' +
-        `🔗 Grupo: ${LINK_GRUPO}\n` +
-        `🎁 Bono:  ${LINK_BONO}`
-    });
+  const hasDoc = !!m.message?.documentMessage;
+  const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
+  const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
+
+  if (hasImage || isPdf || saidPayment) {
+    // Mensaje premium al cliente
+    await sock.sendMessage(from, { text: MENSAJE_PAGO });
+
+    // Marca de pago y métricas
     st.paid = true;
     st.stage = 'enrolled';
     users.set(from, st);
     addEvent('paid');
 
+    // Aviso al dueño
     await notifyOwner(sock, from, 'Pago/Comprobante recibido', '(Imagen o texto de pago detectado)');
     return;
   }
 
   // 7) Duda / fuera de flujo → te avisa, no responde al cliente
-  await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
+  if (text) {
+    await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
+  }
 }
 
 // ---------- Reportes ----------
 function scheduleHourlyReport(sock) {
   setInterval(async () => {
-    // Ventana: última hora
-    const hourMs = 60 * 60 * 1000;
-    const contact = countSince(hourMs, 'contact');
-    const paid    = countSince(hourMs, 'paid');
-
-    // “dejaron en visto”: usuarios que recibieron QR (stage>=quoted), no pagaron y llevan +REMINDER_MINUTES sin responder
+    const windowMs = REPORT_EVERY_MIN * 60 * 1000;
+    const contact = countSince(windowMs, 'contact');
+    const paid    = countSince(windowMs, 'paid');
     const ignored = [...users.values()].filter(u =>
       (u.stage === 'quoted' || u.stage === 'askedName') &&
       !u.paid &&
@@ -243,7 +275,6 @@ function scheduleDailyReport(sock) {
   const delay = next - now;
 
   setTimeout(function runDaily() {
-    // Conteo simple del día
     const today = new Date();
     today.setHours(0,0,0,0);
     const sinceMs = Date.now() - today.getTime();
@@ -263,7 +294,6 @@ function scheduleDailyReport(sock) {
 - Sin respuesta: ${ignored}`;
     sock.sendMessage(OWNER_JID, { text: txt }).catch(()=>{});
 
-    // re-programar cada 24h
     setTimeout(runDaily, 24 * 60 * 60 * 1000);
   }, delay);
 }
@@ -302,13 +332,9 @@ async function start() {
   sock.ev.on('messages.upsert', async ({ type, messages }) => {
     if (type !== 'notify') return;
     const m = messages && messages[0];
-    try {
-      await handleMessage(sock, m);
-    } catch (e) {
-      console.error('Error al responder:', e?.message);
-    }
+    try { await handleMessage(sock, m); }
+    catch (e) { console.error('Error al responder:', e?.message); }
   });
 }
 
-start().catch(err => console.error('Error general:', err));
-
+start().catch(err => console.error('Error general:', err?.message));
