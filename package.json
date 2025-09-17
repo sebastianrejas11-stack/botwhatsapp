@@ -1,13 +1,1 @@
-{
-  "name": "bot-whatsapp",
-  "version": "1.0.0",
-  "description": "Bot WhatsApp sin navegador (Baileys) listo para Railway",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
-    "pino": "^8.17.0"
-  }
-}
+"scripts": { "start": "node index.js" }
