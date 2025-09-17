@@ -1,11 +1,4 @@
-// Bot WhatsApp (Baileys) – Capa 0 endurecida para producción
-// - Sin Chromium, solo @whiskeysockets/baileys
-// - Ignora mensajes viejos (previos al arranque) para evitar re-spam
-// - Solo trabaja con contactos que escriban desde que el bot está encendido
-// - Bloquea números que no sean de +591 (te avisa a ti, no les responde)
-// - Flujo: saludo -> nombre completo -> QR -> 1 recordatorio si no responde
-// - Reportes: cada 60 min y resumen diario a las 22:00 (hora del server)
-// - Pago/comprobante: envía tu mensaje premium y te notifica
+// Bot WhatsApp (Baileys) – Capa 0 pulida con configuración centralizada
 
 const {
   default: makeWASocket,
@@ -17,36 +10,45 @@ const fs = require('fs');
 const path = require('path');
 
 // ========== CONFIG EDITABLE ==========
-const OWNER_PHONE = '59177441414';             // <- tu celular (solo dígitos con código de país)
-const COUNTRY_PREFIX = '591';                   // <- prefijo permitido
-const LINK_PAGO = 'https://tu-link-de-pago';    // fallback si no hay qr.jpg
-const REMINDER_MINUTES = 10;                    // recordatorio si no responde
-const REPORT_EVERY_MIN = 60;                    // reporte cada 60 minutos
+const OWNER_PHONE   = '59177441414'; // tu número con prefijo
+const COUNTRY_PREFIX = '591';        // prefijo permitido
+
+// Links de tu reto
+const LINK_GRUPO = 'https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t';
+const LINK_BONO  = 'https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1';
+const LINK_PAGO  = 'https://tu-link-de-pago'; // fallback si no hay qr.jpg
+
+// Tiempos de recordatorio
+const REMINDER_WELCOME_MIN = 10; // tras bienvenida si no responde
+const REMINDER_QR_MIN      = 10; // tras enviar QR si no responde/paga
 // =====================================
 
-// Mensaje premium al detectar pago/comprobante
-const MENSAJE_PAGO = `🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
+// Mensaje premium post-pago
+function buildMensajePago() {
+  return (
+`🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
 
 Prepárate para iniciar un viaje transformador hacia una vida más plena, consciente y conectada con la energía de la gratitud y la abundancia 💖✨
 
 🔗 Ingresa al grupo aquí:
-https://chat.whatsapp.com/IWA2ae5podREHVFzoUSvxI?mode=ems_copy_t
+${LINK_GRUPO}
 
 🎁 BONO ESPECIAL POR INSCRIBIRTE
 Al unirte, también recibes totalmente gratis el taller de 12 clases para aprender a meditar, ideal para profundizar en tu bienestar y armonía interior 🧘‍♀️🌿
 
 📺 Accede al taller aquí:
-https://www.youtube.com/watch?v=XkjFZY30vHc&list=PLnT-PzQPCplvsx4c-vAvLyk5frp_nHTGx&index=1
+${LINK_BONO}
 
-✨ ¡Gracias por ser parte de este hermoso camino! Nos vemos dentro.`;
+✨ ¡Gracias por ser parte de este hermoso camino! Nos vemos dentro.`
+  );
+}
 
-// Bienvenida y pedido de nombre completo
-function buildBienvenida() {
-  const fecha = nextMondayDate();
+// Bienvenida que pide nombre completo
+function buildBienvenida(fechaLunes) {
   return (
 `Hola 🌟 ¡Gracias por tu interés en el Reto de 21 Días de Gratitud y Abundancia! 🙏✨
 
-Este hermoso reto se realizará por WhatsApp y empieza este lunes ${fecha} 🗓️
+Este hermoso reto se realizará por WhatsApp y empieza este lunes ${fechaLunes} 🗓️
 
 📌 Incluye:
 ✔️ Reflexión + ejercicio diario
@@ -63,30 +65,22 @@ Si deseas inscribirte, por favor respóndeme tu *nombre completo (nombre y apell
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
 // Guardas de tiempo para NO reprocesar historial
-const START_EPOCH = Math.floor(Date.now() / 1000); // timestamp en segundos del arranque
-const HISTORY_GRACE_SEC = 30;                      // margen de seguridad
+const START_EPOCH = Math.floor(Date.now() / 1000);
+const HISTORY_GRACE_SEC = 30;
 
-// Estado en memoria por usuario
-const users = new Map(); // { stage, nombre, lastMsg, reminderSent, paid, firstSeenAt }
+// Estado por usuario
+const users = new Map(); // { stage, nombre, lastMsg, welcomeReminderSent, qrReminderSent, paid }
 
-// Métricas rápidas
-let events = []; // { t: ms, type: 'contact'|'paid'|'reminder' }
-function addEvent(type) { events.push({ t: Date.now(), type }); }
-function countSince(msAgo, type) {
-  const cutoff = Date.now() - msAgo;
-  return events.filter(e => e.type === type && e.t >= cutoff).length;
-}
-
-// Próximo lunes (formato “22 de septiembre”)
+// Próximo lunes
 function nextMondayDate() {
   const now = new Date();
   const day = now.getDay();
-  const daysToMon = (8 - day) % 7 || 7;
-  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysToMon);
+  const add = (1 - day + 7) % 7 || 7;
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + add);
   return d.toLocaleDateString('es-BO', { day: 'numeric', month: 'long' });
 }
 
-// Extraer texto útil
+// Texto útil
 function extractText(m) {
   if (!m || !m.message) return '';
   const msg = m.message;
@@ -100,7 +94,7 @@ function extractText(m) {
   ).trim();
 }
 
-// ¿Nombre y apellido?
+// Es nombre completo
 function isFullName(s) {
   if (!s) return false;
   if (!/^[\p{L} .'\-]+$/u.test(s)) return false;
@@ -108,7 +102,7 @@ function isFullName(s) {
   return parts.length >= 2;
 }
 
-// Enviar QR (imagen qr.jpg si existe; si no, LINK_PAGO)
+// Enviar QR
 async function sendQR(sock, to) {
   try {
     const file = path.join(__dirname, 'qr.jpg');
@@ -123,25 +117,21 @@ async function sendQR(sock, to) {
   }
 }
 
-// Notificar al dueño (tú)
+// Notificar al dueño
 async function notifyOwner(sock, customerJid, title, body) {
-  if (customerJid === OWNER_JID) return;
   const human = customerJid.replace('@s.whatsapp.net', '');
   const text = `*${title}*\nDe: ${human}\n${body ? body + '\n' : ''}`;
   try { await sock.sendMessage(OWNER_JID, { text }); } catch {}
 }
 
-// Lógica por mensaje
+// Handler principal
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return;   // ignora grupos
-  if (from === OWNER_JID) return;                // ignora tus envíos
-
-  // 1) Evitar reprocesar historial (lo que existía antes de arrancar)
-  const ts = Number(m.messageTimestamp || 0); // segundos
+  if (!from || from.endsWith('@g.us')) return;
+  if (m.key.fromMe) return;
+  const ts = Number(m.messageTimestamp || 0);
   if (ts && ts < START_EPOCH - HISTORY_GRACE_SEC) return;
 
-  // 2) Bloquear números fuera de +591 (avisar a ti y salir)
   const num = from.replace('@s.whatsapp.net', '');
   if (!num.startsWith(COUNTRY_PREFIX)) {
     await notifyOwner(sock, from, 'Contacto fuera de país', 'No se respondió (bloqueado por prefijo).');
@@ -150,152 +140,99 @@ async function handleMessage(sock, m) {
 
   const textRaw = extractText(m);
   const text = (textRaw || '').replace(/\s+/g, ' ').trim();
+  if (!text) return;
   const lowered = text.toLowerCase();
 
-  // 3) Tomar/crear estado SOLO cuando entra el primer mensaje (nuevo contacto)
   let st = users.get(from);
   if (!st) {
-    st = { stage: 'start', nombre: '', lastMsg: 0, reminderSent: false, paid: false, firstSeenAt: Date.now() };
+    st = { stage: 'start', nombre: '', lastMsg: 0, welcomeReminderSent: false, qrReminderSent: false, paid: false };
     users.set(from, st);
-    addEvent('contact');
   }
   st.lastMsg = Date.now();
   users.set(from, st);
 
   const said = (re) => re.test(lowered);
 
-  // Comandos útiles
+  // ping
   if (said(/^ping$/i)) {
     await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
     return;
   }
-  if (said(/^reset$/i)) {
-    users.delete(from);
-    await sock.sendMessage(from, { text: '🔄 Reiniciado. Escribe "hola" para comenzar.' });
-    return;
-  }
 
-  // 4) Flujo de bienvenida
-  if (said(/\b(hola|buen dia|buen día|buenas)\b/i)) {
-    await sock.sendMessage(from, { text: buildBienvenida() });
+  // saludo
+  if (said(/\b(hola|buen dia|buen día|buenas)\b/i) || st.stage === 'start') {
+    const fecha = nextMondayDate();
+    await sock.sendMessage(from, { text: buildBienvenida(fecha) });
+
     st.stage = 'askedName';
+    st.welcomeReminderSent = false;
     users.set(from, st);
+
+    setTimeout(async () => {
+      const u = users.get(from);
+      if (!u) return;
+      const noRespuesta = Date.now() - u.lastMsg >= REMINDER_WELCOME_MIN * 60 * 1000;
+      if (u.stage === 'askedName' && !u.welcomeReminderSent && !u.paid && noRespuesta) {
+        await sock.sendMessage(from, { text: '¿Aún tienes interés en el reto? Si es así mándame tu *nombre completo* por favor para anotarte 🙌' });
+        u.welcomeReminderSent = true;
+        users.set(from, u);
+      }
+    }, REMINDER_WELCOME_MIN * 60 * 1000);
+
     return;
   }
 
-  // 5) Nombre completo
+  // nombre completo
   if (st.stage === 'askedName') {
     const parts = text.split(/\s+/).filter(Boolean);
-    if (parts.length < 2) {
-      await sock.sendMessage(from, { text: '🙏 Por favor envíame tu *nombre completo* (nombre y apellido).' });
-      return;
-    }
-    if (isFullName(text)) {
-      st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
-      const fecha = nextMondayDate();
-      await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
-      await sock.sendMessage(from, { text: 'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".' });
-      await sendQR(sock, from);
-
-      st.stage = 'quoted';
-      st.reminderSent = false;
-      users.set(from, st);
-
-      // 1 solo recordatorio si no responde
-      setTimeout(async () => {
-        const u = users.get(from);
-        if (!u) return;
-        if (!u.reminderSent && !u.paid && Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000) {
-          await sock.sendMessage(from, { text: `Hola ${u.nombre || 'amigo'}, ¿sigues interesado en el reto? 😊` });
-          u.reminderSent = true;
-          users.set(from, u);
-          addEvent('reminder');
-        }
-      }, REMINDER_MINUTES * 60 * 1000);
-      return;
-    } else {
+    if (parts.length < 2 || !isFullName(text)) {
       await sock.sendMessage(from, { text: '🙏 Para continuar, envíame tu *nombre completo* (nombre y apellido).' });
       return;
     }
+
+    st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
+    const fecha = nextMondayDate();
+    await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
+    await sock.sendMessage(from, { text: 'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".' });
+    await sendQR(sock, from);
+
+    st.stage = 'quoted';
+    st.qrReminderSent = false;
+    users.set(from, st);
+
+    setTimeout(async () => {
+      const u = users.get(from);
+      if (!u) return;
+      const noRespuesta = Date.now() - u.lastMsg >= REMINDER_QR_MIN * 60 * 1000;
+      if ((u.stage === 'quoted' || u.stage === 'askedName') && !u.qrReminderSent && !u.paid && noRespuesta) {
+        await sock.sendMessage(from, { text: 'Hola, ¿me confirmas el pago para enviarte el *curso de 12 días* y el *acceso al reto*? 🙌' });
+        u.qrReminderSent = true;
+        users.set(from, u);
+      }
+    }, REMINDER_QR_MIN * 60 * 1000);
+
+    return;
   }
 
-  // 6) Pago / comprobante (imagen o texto clave)
+  // pago/comprobante
   const hasImage = !!m.message?.imageMessage;
   const hasDoc = !!m.message?.documentMessage;
   const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
   const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
 
   if (hasImage || isPdf || saidPayment) {
-    // Mensaje premium al cliente
-    await sock.sendMessage(from, { text: MENSAJE_PAGO });
+    await sock.sendMessage(from, { text: buildMensajePago() });
 
-    // Marca de pago y métricas
     st.paid = true;
     st.stage = 'enrolled';
     users.set(from, st);
-    addEvent('paid');
 
-    // Aviso al dueño
-    await notifyOwner(sock, from, 'Pago/Comprobante recibido', '(Imagen o texto de pago detectado)');
+    await notifyOwner(sock, from, 'Pago/Comprobante recibido', '(Imagen, PDF o texto de pago detectado)');
     return;
   }
 
-  // 7) Duda / fuera de flujo → te avisa, no responde al cliente
-  if (text) {
-    await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
-  }
-}
-
-// ---------- Reportes ----------
-function scheduleHourlyReport(sock) {
-  setInterval(async () => {
-    const windowMs = REPORT_EVERY_MIN * 60 * 1000;
-    const contact = countSince(windowMs, 'contact');
-    const paid    = countSince(windowMs, 'paid');
-    const ignored = [...users.values()].filter(u =>
-      (u.stage === 'quoted' || u.stage === 'askedName') &&
-      !u.paid &&
-      (Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000)
-    ).length;
-
-    const txt =
-`📊 *Reporte último ${REPORT_EVERY_MIN} min*
-- Contactaron: ${contact}
-- Pagaron: ${paid}
-- Sin respuesta: ${ignored}`;
-    try { await sock.sendMessage(OWNER_JID, { text: txt }); } catch {}
-  }, REPORT_EVERY_MIN * 60 * 1000);
-}
-
-function scheduleDailyReport(sock) {
-  const now = new Date();
-  const next = new Date(now);
-  next.setHours(22, 0, 0, 0); // 22:00
-  if (next <= now) next.setDate(next.getDate() + 1);
-  const delay = next - now;
-
-  setTimeout(function runDaily() {
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    const sinceMs = Date.now() - today.getTime();
-
-    const contact = countSince(sinceMs, 'contact');
-    const paid    = countSince(sinceMs, 'paid');
-    const ignored = [...users.values()].filter(u =>
-      (u.stage === 'quoted' || u.stage === 'askedName') &&
-      !u.paid &&
-      (Date.now() - u.lastMsg >= REMINDER_MINUTES * 60 * 1000)
-    ).length;
-
-    const txt =
-`🗓️ *Reporte diario*
-- Contactaron hoy: ${contact}
-- Pagaron hoy: ${paid}
-- Sin respuesta: ${ignored}`;
-    sock.sendMessage(OWNER_JID, { text: txt }).catch(()=>{});
-
-    setTimeout(runDaily, 24 * 60 * 60 * 1000);
-  }, delay);
+  // fallback
+  await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
 }
 
 // ---------- Bootstrap ----------
@@ -318,8 +255,6 @@ async function start() {
     }
     if (connection === 'open') {
       console.log('✅ Conectado a WhatsApp. Escuchando mensajes...');
-      scheduleHourlyReport(sock);
-      scheduleDailyReport(sock);
     }
     if (connection === 'close') {
       console.log('❌ Conexión cerrada. Reintentando...');
