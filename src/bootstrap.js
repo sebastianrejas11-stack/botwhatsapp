@@ -1,24 +1,28 @@
-// src/bootstrap.js
+// src/bootstrap.js (versión debug: muestra QR ASCII + LINK y logea el motivo del cierre)
 const path = require("path");
 const fs = require("fs");
 const pino = require("pino");
 const {
   default: makeWASocket,
   useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason
+  fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 
 const { onMessage } = require("./handlers");
 
 async function connectToWhatsApp() {
-  // ✅ En Railway el FS es efímero, pero escribible; guardamos aquí
   const AUTH_DIR = path.join(__dirname, "..", "auth");
 
-  // 👉 Reset opcional: agrega RESET_AUTH=1 en Railway → Redeploy (solo 1 vez)
-  if (process.env.RESET_AUTH) {
+  // crea carpeta si no existe (a veces el borrado previo deja la ruta sin crear)
+  if (!fs.existsSync(AUTH_DIR)) {
+    fs.mkdirSync(AUTH_DIR, { recursive: true });
+  }
+
+  // Forzar reset si seteas la variable en Railway
+  if (process.env.RESET_AUTH === "1" || process.env.RESET_AUTH === "true") {
     try {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+      fs.mkdirSync(AUTH_DIR, { recursive: true });
       console.log("🧹 Auth borrado. Se generará un nuevo QR.");
     } catch (e) {
       console.log("No se pudo borrar auth:", e?.message);
@@ -31,17 +35,17 @@ async function connectToWhatsApp() {
   const sock = makeWASocket({
     version,
     auth: state,
-    logger: pino({ level: "silent" }),
-    // ⛔️ NO ASCII en consola (Railway), solo link bonito:
-    printQRInTerminal: false
+    logger: pino({ level: "info" }),
+    // Mostramos ambos: ASCII en logs y link “clickeable”
+    printQRInTerminal: true
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
+  sock.ev.on("connection.update", (update) => {
     const { qr, connection, lastDisconnect } = update;
 
-    // ✅ Como “antes”: si hay QR, imprimimos el LINK para escanear
+    // QR como LINK (además del ASCII que imprime Baileys)
     if (qr) {
       const url =
         "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" +
@@ -54,29 +58,31 @@ async function connectToWhatsApp() {
     }
 
     if (connection === "close") {
-      const statusCode =
-        lastDisconnect?.error?.output?.statusCode ||
-        lastDisconnect?.error?.statusCode;
+      // Log detallado del motivo
+      const err = lastDisconnect?.error;
+      const msg = err?.message || err?.toString?.() || "desconocido";
+      const code =
+        err?.output?.statusCode || err?.statusCode || err?.code || "s/código";
 
-      // 🔒 Si las credenciales están inválidas/expiraron → borra auth y pide QR nuevo
+      console.log("❌ Conexión cerrada. Motivo:", msg, "| Código:", code);
+
+      // Si es sesión inválida, borra auth para forzar nuevo QR
       const isAuthIssue =
-        statusCode === 401 ||
-        lastDisconnect?.error?.message?.includes("bad session") ||
-        lastDisconnect?.error?.message?.includes("logged out") ||
-        lastDisconnect?.error?.toString?.().includes("401");
+        String(code) === "401" ||
+        /logged out|bad session|restart required|invalid/i.test(msg);
 
       if (isAuthIssue) {
         try {
           fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-          console.log("🔐 Sesión inválida. Auth borrado → se requerirá nuevo QR.");
+          fs.mkdirSync(AUTH_DIR, { recursive: true });
+          console.log("🔐 Sesión inválida. Auth borrado → se pedirá QR de nuevo.");
         } catch (e) {
           console.log("Error borrando auth tras logout:", e?.message);
         }
       }
 
-      console.log("❌ Conexión cerrada. Reintentando…");
-      // Reintenta SIEMPRE (si se borró auth, el próximo ciclo mostrará QR)
       setTimeout(() => {
+        console.log("🔁 Reintentando conexión…");
         connectToWhatsApp().catch((e) =>
           console.error("Reinicio falló:", e?.message)
         );
@@ -84,7 +90,6 @@ async function connectToWhatsApp() {
     }
   });
 
-  // 🚚 Mensajes entrantes → lógica modular
   sock.ev.on("messages.upsert", async ({ type, messages }) => {
     if (type !== "notify") return;
     for (const m of messages) {
@@ -100,3 +105,4 @@ async function connectToWhatsApp() {
 }
 
 module.exports = { connectToWhatsApp };
+
