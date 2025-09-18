@@ -7,7 +7,7 @@ const {
   LINK_GRUPO,
   LINK_BONO,
   LINK_PAGO,
-  REMINDER_WELCOME_MIN,
+  REMINDER_WELCOME_MIN, // (no usados aquí, pero mantenemos por compatibilidad)
   REMINDER_QR_MIN
 } = require('./config');
 
@@ -15,11 +15,11 @@ const { getUser, upsertUser } = require('./state');
 
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
-// Ventana para ignorar historial
+// Ignorar historial viejo
 const START_EPOCH = Math.floor(Date.now() / 1000);
 const HISTORY_GRACE_SEC = 30;
 
-// ====== Helpers ======
+// ===== Helpers =====
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 const humanPause = async () => delay(1200 + Math.floor(Math.random() * 600)); // ~1.2–1.8s
 
@@ -44,46 +44,46 @@ function extractText(m) {
   ).trim();
 }
 
-function normalize(s = "") {
-  return (s || "")
+function normalize(s = '') {
+  return (s || '')
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
-function isStartTrigger(raw = "") {
+function isStartTrigger(raw = '') {
   const t = normalize(raw);
-  if (t.includes("me uno")) return true;
+  if (t.includes('me uno')) return true;
   if (/\b(hola|buen dia|buen día|buenas)\b/i.test(t)) return true;
-  if (t.includes("me apunto")) return true;
-  if (t.includes("quiero unirme")) return true;
+  if (t.includes('me apunto')) return true;
+  if (t.includes('quiero unirme')) return true;
   return false;
 }
 
-function wantsQR(raw = "") {
+function wantsQR(raw = '') {
   const t = normalize(raw);
   return (
-    t.includes("como pago") ||
-    t.includes("cómo pago") ||
-    t.includes("pagar") ||
-    t.includes("pago") ||
-    t.includes("metodo de pago") ||
-    t.includes("método de pago") ||
-    t.includes("qr") ||
-    t.includes("pásame el qr") ||
-    t.includes("pasame el qr")
+    t.includes('como pago') ||
+    t.includes('cómo pago') ||
+    t.includes('pagar') ||
+    t.includes('pago') ||
+    t.includes('metodo de pago') ||
+    t.includes('método de pago') ||
+    t.includes('qr') ||
+    t.includes('pásame el qr') ||
+    t.includes('pasame el qr')
   );
 }
 
-function saysYes(raw = "") {
+function saysYes(raw = '') {
   const t = normalize(raw);
   return (
-    t === "si" || t === "sí" ||
-    t.includes("si quiero") || t.includes("sí quiero") ||
-    t.includes("si por favor") || t.includes("sí por favor") ||
-    t.includes("mándame el qr") || t.includes("mandame el qr") ||
-    t.includes("pasame el qr") || t.includes("pásame el qr")
+    t === 'si' || t === 'sí' ||
+    t.includes('si quiero') || t.includes('sí quiero') ||
+    t.includes('si por favor') || t.includes('sí por favor') ||
+    t.includes('mándame el qr') || t.includes('mandame el qr') ||
+    t.includes('pasame el qr') || t.includes('pásame el qr')
   );
 }
 
@@ -93,7 +93,7 @@ async function notifyOwner(sock, customerJid, title, body) {
   try { await sock.sendMessage(OWNER_JID, { text }); } catch {}
 }
 
-// ====== Envío de imágenes ======
+// ===== Imágenes =====
 function findFirstExisting(paths) {
   for (const p of paths) {
     try { if (fs.existsSync(p)) return p; } catch {}
@@ -145,9 +145,9 @@ async function sendQR(sock, to, caption = 'Escanéalo y envíame tu comprobante 
   }
 }
 
-// ====== Copy ======
+// ===== Copy =====
 function copyPriceAndBonusCaption() {
-  // Este texto va dentro del CAPTION del QR (S0) → así enviamos solo 2 mensajes.
+  // Va como CAPTION del QR en S0 para reducir a 2 mensajes
   return (
 `👉 El valor del reto es de *35 Bs*.
 Si te inscribes *HOY* recibes *GRATIS* el curso de meditación (12 clases) 🧘‍♀️
@@ -157,25 +157,31 @@ Aquí tienes el *QR* para tu inscripción.
   );
 }
 
-function copyReSendQR(name = '') {
-  // Para reenvío del QR (S1) mantenemos un caption más breve
+function copyReSendQR() {
   return (
 `Aquí tienes nuevamente el *QR* para tu inscripción.
-*Escanéalo* y envíame tu comprobante aquí mismo 📲` );
+*Escanéalo* y envíame tu comprobante aquí mismo 📲`
+  );
 }
 
-function copyWelcomeAfterPayment(name = '') {
+// ✅ BIENVENIDA exacta que pediste (se envía al confirmar pago)
+function copyWelcomeAfterPaymentExact() {
   return (
-`¡Pago recibido 🎉! Bienvenid${name ? 'a/o ' + name : 'a/o'} al *Reto de 21 Días de Gratitud y Abundancia* 🌟
+`🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
 
-👉 Accede al grupo privado aquí:
-${LINK_GRUPO}
+Prepárate para iniciar un viaje transformador hacia una vida más plena, consciente y conectada con la energía de la gratitud y la abundancia 💖✨
 
-🎁 *Bonos incluidos:*
-- Libro digital del reto 📘
-- Taller de meditación (12 clases) 🧘‍♀️
-- Afirmación poderosa para repetir cada día y atraer abundancia 💰✨`
-  );
+🔗 Ingresa al grupo aquí:
+${LINK_GRURO || LINK_GRUPO}  <!-- si tu config usa LINK_GRUPO, mantén LINK_GRUPO -->
+  
+🎁 BONO ESPECIAL POR INSCRIBIRTE
+Al unirte, también recibes totalmente gratis el taller de 12 clases para aprender a meditar, ideal para profundizar en tu bienestar y armonía interior 🧘‍♀️🌿
+
+📺 Accede al taller aquí:
+${LINK_BONO}
+
+✨ ¡Gracias por ser parte de este hermoso camino! Nos vemos dentro.`
+  ).replace('LINK_GRURO', 'LINK_GRUPO'); // salvaguarda por si copiaste mal el nombre
 }
 
 function copyClose(name = '') {
@@ -198,7 +204,7 @@ Recuerda que al inscribirte *HOY* recibes:
 ¿Quieres que te pase el *QR* de nuevo?`);
 }
 
-// ====== Handler principal ======
+// ===== Handler principal =====
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
   if (!from || from.endsWith('@g.us')) return;
@@ -235,20 +241,25 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== S2 — Pago detectado (imagen o PDF o palabras) =====
+  // ===== S2 — Pago/comprobante detectado =====
   const hasImage = !!m.message?.imageMessage;
   const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
   const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
+
   if (hasImage || isPdf || saidPayment) {
     st.paid = true;
     st.stage = 'enrolled';
     st.followUpSent = true;
     upsertUser(from, st);
 
-    await sock.sendMessage(from, { text: copyWelcomeAfterPayment(st.nombre) });
+    // 1) 👇 Mensaje de bienvenida EXACTO
+    await sock.sendMessage(from, { text: copyWelcomeAfterPaymentExact() });
     await humanPause();
+
+    // 2) Cierre/confirmación con fecha
     await sock.sendMessage(from, { text: copyClose(st.nombre) });
 
+    // 3) Notificación al dueño
     await notifyOwner(
       sock,
       from,
@@ -263,26 +274,22 @@ async function handleMessage(sock, m) {
     st.lastPromptWasFollowUp = false;
     upsertUser(from, st);
 
-    // Reenvío del QR: mensaje breve + QR con caption corto
     await sock.sendMessage(from, { text: `Claro${st.nombre ? ' ' + st.nombre : ''} 🙌` });
     await humanPause();
-    await sendQR(sock, from, copyReSendQR(st.nombre));
+    await sendQR(sock, from, copyReSendQR());
     return;
   }
 
-  // ===== S0 — Inicio / Primer contacto (SOLO 2 mensajes con ritmo humano) =====
+  // ===== S0 — Primer contacto (2 mensajes con ritmo humano) =====
   if (isStartTrigger(text) || st.stage === 'start') {
-    // 1) Prueba social
-    await sendSocialProof(sock, from);
+    await sendSocialProof(sock, from);           // 1) Prueba social
     await humanPause();
+    await sendQR(sock, from, copyPriceAndBonusCaption()); // 2) QR con caption (precio+bono)
 
-    // 2) QR con caption que INCLUYE el precio + bono + CTA
-    await sendQR(sock, from, copyPriceAndBonusCaption());
-
-    // Estado y follow-up único a 15 min
     st.stage = 'waitingPayment';
     upsertUser(from, st);
 
+    // Follow-up único a los 15 min
     if (!st.followUpScheduled) {
       st.followUpScheduled = true;
       upsertUser(from, st);
@@ -302,7 +309,7 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== Duda no reconocida → notifica y silencio =====
+  // ===== Duda no reconocida → notifica al dueño y silencio =====
   await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
 }
 
