@@ -51,7 +51,7 @@ function isFullName(s) {
 function normalizeForMatch(s = "") {
   return (s || "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ") // quita emojis/símbolos
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -65,22 +65,36 @@ function isStartTrigger(loweredRaw = "") {
   return false;
 }
 
-// QR con bono en el mismo mensaje (caption si hay imagen)
+// ====== CAPTION EXACTO BAJO EL QR ======
+const QR_CAPTION =
+  'Si te inscribes hoy, recibes de regalo el curso de 12 días\n\n' +
+  '*"Aprende a meditar desde cero"*';
+
+// QR con búsqueda robusta de archivo (varias rutas)
 async function sendQR(sock, to) {
-  const caption =
-    'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".\n\n' +
-    'Escanea este QR para inscribirte ✅';
+  // Posibles rutas del QR dentro del repo/contendor
+  const candidatePaths = [
+    path.join(process.cwd(), 'qr.jpg'),
+    path.join(__dirname, '..', 'qr.jpg'),
+    path.join(process.cwd(), 'assets', 'qr.jpg'),
+  ];
+
+  let fileFound = null;
+  for (const p of candidatePaths) {
+    try {
+      if (fs.existsSync(p)) { fileFound = p; break; }
+    } catch { /* ignore */ }
+  }
 
   try {
-    const file = path.join(process.cwd(), 'qr.jpg'); // coloca qr.jpg en la raíz del proyecto
-    if (fs.existsSync(file)) {
-      const buffer = fs.readFileSync(file);
-      await sock.sendMessage(to, { image: buffer, caption });
+    if (fileFound) {
+      const buffer = fs.readFileSync(fileFound);
+      await sock.sendMessage(to, { image: buffer, caption: QR_CAPTION });
     } else {
+      console.warn('⚠️ qr.jpg NO encontrado. Rutas probadas:', candidatePaths);
+      // Fallback (texto + link) – se manda solo si realmente no hay imagen
       await sock.sendMessage(to, {
-        text:
-          'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".\n\n' +
-          `Escanea aquí: ${LINK_PAGO}`
+        text: `${QR_CAPTION}\n\nEscanea aquí: ${LINK_PAGO}`
       });
     }
   } catch (e) {
@@ -205,7 +219,7 @@ async function handleMessage(sock, m) {
     // Solo precio aquí
     await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
 
-    // QR con bono en el caption / texto
+    // QR con caption exacto
     await sendQR(sock, from);
 
     st.stage = 'quoted';
