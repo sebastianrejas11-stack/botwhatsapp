@@ -3,11 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const {
   OWNER_PHONE,
-  COUNTRY_PREFIX,
+  COUNTRY_PREFIX,  // espera "591" en tu config.js
   LINK_GRUPO,
   LINK_BONO,
   LINK_PAGO,
-  REMINDER_WELCOME_MIN, // (no usados aquí, pero mantenemos por compatibilidad)
+  REMINDER_WELCOME_MIN, // no los usamos aquí, pero los dejamos por compatibilidad
   REMINDER_QR_MIN
 } = require('./config');
 
@@ -15,7 +15,7 @@ const { getUser, upsertUser } = require('./state');
 
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
-// Ignorar historial viejo
+// Ignorar historial viejo (para no reprocesar mensajes anteriores al arranque)
 const START_EPOCH = Math.floor(Date.now() / 1000);
 const HISTORY_GRACE_SEC = 30;
 
@@ -54,7 +54,7 @@ function normalize(s = '') {
 
 function isStartTrigger(raw = '') {
   const t = normalize(raw);
-  if (t.includes('me uno')) return true;
+  if (t.includes('me uno')) return true;                // ✨ME UNO✨
   if (/\b(hola|buen dia|buen día|buenas)\b/i.test(t)) return true;
   if (t.includes('me apunto')) return true;
   if (t.includes('quiero unirme')) return true;
@@ -93,7 +93,7 @@ async function notifyOwner(sock, customerJid, title, body) {
   try { await sock.sendMessage(OWNER_JID, { text }); } catch {}
 }
 
-// ===== Imágenes =====
+// ===== Imágenes / assets =====
 function findFirstExisting(paths) {
   for (const p of paths) {
     try { if (fs.existsSync(p)) return p; } catch {}
@@ -164,7 +164,7 @@ function copyReSendQR() {
   );
 }
 
-// ✅ BIENVENIDA exacta que pediste (se envía al confirmar pago)
+// ✅ Bienvenida exacta post-pago
 function copyWelcomeAfterPaymentExact() {
   return (
 `🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
@@ -172,8 +172,8 @@ function copyWelcomeAfterPaymentExact() {
 Prepárate para iniciar un viaje transformador hacia una vida más plena, consciente y conectada con la energía de la gratitud y la abundancia 💖✨
 
 🔗 Ingresa al grupo aquí:
-${LINK_GRURO || LINK_GRUPO}  <!-- si tu config usa LINK_GRUPO, mantén LINK_GRUPO -->
-  
+${LINK_GRUPO}
+
 🎁 BONO ESPECIAL POR INSCRIBIRTE
 Al unirte, también recibes totalmente gratis el taller de 12 clases para aprender a meditar, ideal para profundizar en tu bienestar y armonía interior 🧘‍♀️🌿
 
@@ -181,7 +181,7 @@ Al unirte, también recibes totalmente gratis el taller de 12 clases para aprend
 ${LINK_BONO}
 
 ✨ ¡Gracias por ser parte de este hermoso camino! Nos vemos dentro.`
-  ).replace('LINK_GRURO', 'LINK_GRUPO'); // salvaguarda por si copiaste mal el nombre
+  );
 }
 
 function copyClose(name = '') {
@@ -207,12 +207,14 @@ Recuerda que al inscribirte *HOY* recibes:
 // ===== Handler principal =====
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return;
-  if (m.key.fromMe) return;
+  if (!from || from.endsWith('@g.us')) return; // ignorar grupos
+  if (m.key.fromMe) return;                    // ignorar mis propios mensajes
 
+  // Ignorar historial viejo
   const ts = Number(m.messageTimestamp || 0);
   if (ts && ts < START_EPOCH - HISTORY_GRACE_SEC) return;
 
+  // ✅ Bolivia +591 (bloquea otros prefijos)
   const num = from.replace('@s.whatsapp.net', '');
   if (!num.startsWith(COUNTRY_PREFIX)) {
     await notifyOwner(sock, from, 'Contacto fuera de país', 'No se respondió (prefijo bloqueado).');
@@ -223,6 +225,7 @@ async function handleMessage(sock, m) {
   const text = (textRaw || '').trim();
   const lowered = normalize(text);
 
+  // Estado del usuario
   let st = getUser(from) || {
     stage: 'start',
     nombre: '',
@@ -242,77 +245,4 @@ async function handleMessage(sock, m) {
   }
 
   // ===== S2 — Pago/comprobante detectado =====
-  const hasImage = !!m.message?.imageMessage;
-  const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
-  const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
-
-  if (hasImage || isPdf || saidPayment) {
-    st.paid = true;
-    st.stage = 'enrolled';
-    st.followUpSent = true;
-    upsertUser(from, st);
-
-    // 1) 👇 Mensaje de bienvenida EXACTO
-    await sock.sendMessage(from, { text: copyWelcomeAfterPaymentExact() });
-    await humanPause();
-
-    // 2) Cierre/confirmación con fecha
-    await sock.sendMessage(from, { text: copyClose(st.nombre) });
-
-    // 3) Notificación al dueño
-    await notifyOwner(
-      sock,
-      from,
-      '📢 Nuevo pago recibido',
-      `Usuario: ${st.nombre || num}\nYa fue enviado el acceso al grupo y los bonos.`
-    );
-    return;
-  }
-
-  // ===== S1 — Pedir/reenviar QR =====
-  if (wantsQR(lowered) || (st.lastPromptWasFollowUp && saysYes(lowered))) {
-    st.lastPromptWasFollowUp = false;
-    upsertUser(from, st);
-
-    await sock.sendMessage(from, { text: `Claro${st.nombre ? ' ' + st.nombre : ''} 🙌` });
-    await humanPause();
-    await sendQR(sock, from, copyReSendQR());
-    return;
-  }
-
-  // ===== S0 — Primer contacto (2 mensajes con ritmo humano) =====
-  if (isStartTrigger(text) || st.stage === 'start') {
-    await sendSocialProof(sock, from);           // 1) Prueba social
-    await humanPause();
-    await sendQR(sock, from, copyPriceAndBonusCaption()); // 2) QR con caption (precio+bono)
-
-    st.stage = 'waitingPayment';
-    upsertUser(from, st);
-
-    // Follow-up único a los 15 min
-    if (!st.followUpScheduled) {
-      st.followUpScheduled = true;
-      upsertUser(from, st);
-
-      setTimeout(async () => {
-        const u = getUser(from);
-        if (!u || u.paid || u.followUpSent) return;
-        const noRespuesta = Date.now() - u.lastMsg >= 15 * 60 * 1000;
-        if (u.stage === 'waitingPayment' && noRespuesta) {
-          await sock.sendMessage(from, { text: copyFollowUp(u.nombre) });
-          u.followUpSent = true;
-          u.lastPromptWasFollowUp = true;
-          upsertUser(from, u);
-        }
-      }, 15 * 60 * 1000);
-    }
-    return;
-  }
-
-  // ===== Duda no reconocida → notifica al dueño y silencio =====
-  await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
-}
-
-module.exports = { handleMessage };
-
-
+  // Cubrimos: foto normal, pdf, imagen enviada como documento, y textos típ
