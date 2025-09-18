@@ -1,9 +1,16 @@
 // src/bootstrap.js
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+// Baileys es ESM. En CJS debemos cargarlo con dynamic import() dentro de una función async.
 const pino = require('pino');
 const { handleMessage } = require('./handlers');
 
 async function connectToWhatsApp() {
+  // 👇 Carga dinámica de Baileys (ESM) desde CommonJS
+  const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion
+  } = await import('@whiskeysockets/baileys');
+
   const { state, saveCreds } = await useMultiFileAuthState('./auth');
   const { version } = await fetchLatestBaileysVersion();
 
@@ -40,4 +47,5 @@ async function connectToWhatsApp() {
 }
 
 module.exports = { connectToWhatsApp };
+
 
