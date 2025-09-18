@@ -3,25 +3,24 @@ const fs = require('fs');
 const path = require('path');
 const {
   OWNER_PHONE,
-  COUNTRY_PREFIX,  // espera "591" en tu config.js
+  COUNTRY_PREFIX,
   LINK_GRUPO,
   LINK_BONO,
   LINK_PAGO,
-  REMINDER_WELCOME_MIN, // no los usamos aquí, pero los dejamos por compatibilidad
+  REMINDER_WELCOME_MIN, // mantenidos por compatibilidad
   REMINDER_QR_MIN
 } = require('./config');
-
 const { getUser, upsertUser } = require('./state');
 
 const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 
-// Ignorar historial viejo (para no reprocesar mensajes anteriores al arranque)
+// ===== Ventana anti-historial
 const START_EPOCH = Math.floor(Date.now() / 1000);
 const HISTORY_GRACE_SEC = 30;
 
-// ===== Helpers =====
+// ===== Utils =====
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
-const humanPause = async () => delay(1200 + Math.floor(Math.random() * 600)); // ~1.2–1.8s
+const humanPause = async () => delay(1200 + Math.floor(Math.random() * 600)); // 1.2–1.8s
 
 function nextMondayDate() {
   const now = new Date();
@@ -54,7 +53,7 @@ function normalize(s = '') {
 
 function isStartTrigger(raw = '') {
   const t = normalize(raw);
-  if (t.includes('me uno')) return true;                // ✨ME UNO✨
+  if (t.includes('me uno')) return true;
   if (/\b(hola|buen dia|buen día|buenas)\b/i.test(t)) return true;
   if (t.includes('me apunto')) return true;
   if (t.includes('quiero unirme')) return true;
@@ -89,11 +88,11 @@ function saysYes(raw = '') {
 
 async function notifyOwner(sock, customerJid, title, body) {
   const human = customerJid.replace('@s.whatsapp.net', '');
-  const text = `*${title}*\nDe: ${human}\n${body ? (body + '\n') : ''}`;
+  const text = `*${title}*\nDe: ${human}\n${body ? body + '\n' : ''}`;
   try { await sock.sendMessage(OWNER_JID, { text }); } catch {}
 }
 
-// ===== Imágenes / assets =====
+// ===== Archivos imágenes =====
 function findFirstExisting(paths) {
   for (const p of paths) {
     try { if (fs.existsSync(p)) return p; } catch {}
@@ -105,7 +104,7 @@ function getQRPath() {
   return findFirstExisting([
     path.join(process.cwd(), 'qr.jpg'),
     path.join(__dirname, '..', 'qr.jpg'),
-    path.join(process.cwd(), 'assets', 'qr.jpg'),
+    path.join(process.cwd(), 'assets', 'qr.jpg')
   ]);
 }
 
@@ -113,7 +112,7 @@ function getSocialPath() {
   return findFirstExisting([
     path.join(process.cwd(), 'social.jpg'),
     path.join(__dirname, '..', 'social.jpg'),
-    path.join(process.cwd(), 'assets', 'social.jpg'),
+    path.join(process.cwd(), 'assets', 'social.jpg')
   ]);
 }
 
@@ -145,9 +144,9 @@ async function sendQR(sock, to, caption = 'Escanéalo y envíame tu comprobante 
   }
 }
 
-// ===== Copy =====
+// ===== Copys =====
 function copyPriceAndBonusCaption() {
-  // Va como CAPTION del QR en S0 para reducir a 2 mensajes
+  // Se envía como CAPTION del QR en S0 (2 mensajes totales)
   return (
 `👉 El valor del reto es de *35 Bs*.
 Si te inscribes *HOY* recibes *GRATIS* el curso de meditación (12 clases) 🧘‍♀️
@@ -164,7 +163,7 @@ function copyReSendQR() {
   );
 }
 
-// ✅ Bienvenida exacta post-pago
+// Bienvenida exacta post-pago
 function copyWelcomeAfterPaymentExact() {
   return (
 `🌟 ¡Te doy la bienvenida al Reto de 21 Días de Gratitud y de Abundancia! 🌟
@@ -201,20 +200,19 @@ Recuerda que al inscribirte *HOY* recibes:
 ✅ El curso de meditación (12 clases) 🧘‍♀️
 ✅ Una afirmación poderosa para atraer abundancia 💰
 
-¿Quieres que te pase el *QR* de nuevo?`);
+¿Quieres que te pase el *QR* de nuevo?`
+  );
 }
 
 // ===== Handler principal =====
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return; // ignorar grupos
-  if (m.key.fromMe) return;                    // ignorar mis propios mensajes
+  if (!from || from.endsWith('@g.us')) return;
+  if (m.key.fromMe) return;
 
-  // Ignorar historial viejo
   const ts = Number(m.messageTimestamp || 0);
   if (ts && ts < START_EPOCH - HISTORY_GRACE_SEC) return;
 
-  // ✅ Bolivia +591 (bloquea otros prefijos)
   const num = from.replace('@s.whatsapp.net', '');
   if (!num.startsWith(COUNTRY_PREFIX)) {
     await notifyOwner(sock, from, 'Contacto fuera de país', 'No se respondió (prefijo bloqueado).');
@@ -225,7 +223,6 @@ async function handleMessage(sock, m) {
   const text = (textRaw || '').trim();
   const lowered = normalize(text);
 
-  // Estado del usuario
   let st = getUser(from) || {
     stage: 'start',
     nombre: '',
@@ -238,11 +235,82 @@ async function handleMessage(sock, m) {
   st.lastMsg = Date.now();
   upsertUser(from, st);
 
-  // Ping
+  // ping
   if (/^ping$/i.test(text)) {
     await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
     return;
   }
 
   // ===== S2 — Pago/comprobante detectado =====
-  // Cubrimos: foto normal, pdf, imagen enviada como documento, y textos típ
+  const hasImage = !!m.message?.imageMessage;
+  const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
+  const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
+
+  if (hasImage || isPdf || saidPayment) {
+    st.paid = true;
+    st.stage = 'enrolled';
+    st.followUpSent = true;
+    upsertUser(from, st);
+
+    // 1) Bienvenida exacta
+    await sock.sendMessage(from, { text: copyWelcomeAfterPaymentExact() });
+    await humanPause();
+
+    // 2) Cierre/fecha
+    await sock.sendMessage(from, { text: copyClose(st.nombre) });
+
+    // 3) Notificación al dueño
+    await notifyOwner(
+      sock,
+      from,
+      '📢 Nuevo pago recibido',
+      `Usuario: ${st.nombre || num}\nYa fue enviado el acceso al grupo y los bonos.`
+    );
+    return;
+  }
+
+  // ===== S1 — Pide/reenviar QR =====
+  if (wantsQR(lowered) || (st.lastPromptWasFollowUp && saysYes(lowered))) {
+    st.lastPromptWasFollowUp = false;
+    upsertUser(from, st);
+
+    await sock.sendMessage(from, { text: `Claro${st.nombre ? ' ' + st.nombre : ''} 🙌` });
+    await humanPause();
+    await sendQR(sock, from, copyReSendQR());
+    return;
+  }
+
+  // ===== S0 — Inicio (dos mensajes con pausa humana) =====
+  if (isStartTrigger(text) || st.stage === 'start') {
+    await sendSocialProof(sock, from);
+    await humanPause();
+    await sendQR(sock, from, copyPriceAndBonusCaption());
+
+    st.stage = 'waitingPayment';
+    upsertUser(from, st);
+
+    // Follow-up único 15 min
+    if (!st.followUpScheduled) {
+      st.followUpScheduled = true;
+      upsertUser(from, st);
+
+      setTimeout(async () => {
+        const u = getUser(from);
+        if (!u || u.paid || u.followUpSent) return;
+        const noRespuesta = Date.now() - u.lastMsg >= 15 * 60 * 1000;
+        if (u.stage === 'waitingPayment' && noRespuesta) {
+          await sock.sendMessage(from, { text: copyFollowUp(u.nombre) });
+          u.followUpSent = true;
+          u.lastPromptWasFollowUp = true;
+          upsertUser(from, u);
+        }
+      }, 15 * 60 * 1000);
+    }
+    return;
+  }
+
+  // ===== Duda no reconocida: notifica al dueño y silencio =====
+  await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
+}
+
+module.exports = { handleMessage };
