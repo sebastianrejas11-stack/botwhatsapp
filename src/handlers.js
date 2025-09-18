@@ -61,7 +61,7 @@ function normalize(s = '') {
 function isStartTrigger(raw = '') {
   const t = normalize(raw);
   if (t.includes('me uno')) return true; // ✨ME UNO✨
-  if (/\b(hola|buen dia|buen dia|buenas)\b/i.test(t)) return true;
+  if (/\b(hola|buen dia|buen día|buenas)\b/i.test(t)) return true;
   if (t.includes('me apunto')) return true;
   if (t.includes('quiero unirme')) return true;
   return false;
@@ -77,7 +77,6 @@ function wantsQR(raw = '') {
     t.includes('pasame el qr') ||
     t.includes('pasame qr') ||
     t.includes('mandame el qr') ||
-    t.includes('mndame el qr') ||
     t.includes('pago')
   );
 }
@@ -85,9 +84,12 @@ function wantsQR(raw = '') {
 function saysYes(raw = '') {
   const t = normalize(raw);
   return (
-    t === 'si' || t === 'si' ||
-    t.includes('si quiero') || t.includes('si por favor') ||
-    t.includes('mandame el qr') || t.includes('pasame el qr') || t.includes('pasa el qr')
+    t === 'si' ||
+    t.includes('si quiero') ||
+    t.includes('si por favor') ||
+    t.includes('mandame el qr') ||
+    t.includes('pasame el qr') ||
+    t.includes('pasa el qr')
   );
 }
 
@@ -151,7 +153,6 @@ async function sendQR(sock, to, caption = 'Escanéalo y envíame tu comprobante 
 
 // ===== Textos =====
 function copyPriceAndBonusCaption() {
-  // Va como CAPTION del QR para reducir a 2 mensajes en S0
   return (
 `👉 El valor del reto es de *35 Bs*.
 Si te inscribes *HOY* recibes *GRATIS* el curso de meditación (12 clases) 🧘‍♀️
@@ -210,13 +211,13 @@ Recuerda que al inscribirte *HOY* recibes:
 // ===== Handler principal =====
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return; // ignorar grupos
+  if (!from || from.endsWith('@g.us')) return;
   if (m.key.fromMe) return;
 
   const ts = Number(m.messageTimestamp || 0);
   if (ts && ts < START_EPOCH - HISTORY_GRACE_SEC) return;
 
-  // Filtra solo Bolivia +591 (según tu negocio)
+  // Solo Bolivia +591
   const num = from.replace('@s.whatsapp.net', '');
   if (!num.startsWith(COUNTRY_PREFIX)) {
     await notifyOwner(sock, from, 'Contacto fuera de país', 'No se respondió (prefijo bloqueado).');
@@ -240,22 +241,21 @@ async function handleMessage(sock, m) {
   st.lastMsg = Date.now();
   upsertUser(from, st);
 
-  // ===== Comandos del dueño (desde tu número) =====
+  // Comando dueño
   const isOwner = from === OWNER_JID;
-
   if (isOwner && /^recargar faq$/i.test(text)) {
     const n = await reloadFaq();
     await sock.sendMessage(from, { text: `🔄 FAQ recargada (${n} filas).` });
     return;
   }
 
-  // Ping simple
+  // Ping
   if (/^ping$/i.test(text)) {
     await sock.sendMessage(from, { text: '¡Estoy vivo! 🤖' });
     return;
   }
 
-  // ===== S2 — Pago/comprobante detectado =====
+  // S2 — Pago/comprobante
   const hasImage = !!m.message?.imageMessage;
   const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
   const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
@@ -279,7 +279,7 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== S1 — Pedir/reenviar QR =====
+  // S1 — QR
   if (wantsQR(lowered) || (st.lastPromptWasFollowUp && saysYes(lowered))) {
     st.lastPromptWasFollowUp = false;
     upsertUser(from, st);
@@ -290,16 +290,15 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== S0 — Primer contacto (2 mensajes con ritmo humano) =====
+  // S0 — Inicio
   if (isStartTrigger(text) || st.stage === 'start') {
-    await sendSocialProof(sock, from);                 // 1) Prueba social
+    await sendSocialProof(sock, from);
     await humanPause();
-    await sendQR(sock, from, copyPriceAndBonusCaption()); // 2) QR con caption (precio+bono)
+    await sendQR(sock, from, copyPriceAndBonusCaption());
 
     st.stage = 'waitingPayment';
     upsertUser(from, st);
 
-    // Follow-up único a los 15 min
     if (!st.followUpScheduled) {
       st.followUpScheduled = true;
       upsertUser(from, st);
@@ -319,7 +318,7 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== FAQ (Google Sheet) como fallback =====
+  // FAQ desde Google Sheet
   if (text) {
     let faqAns = answerFromFaq(text);
     if (faqAns) {
@@ -330,7 +329,7 @@ async function handleMessage(sock, m) {
     }
   }
 
-  // ===== Duda no reconocida → notifica al dueño y silencio =====
+  // Duda no reconocida
   await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
 }
 
