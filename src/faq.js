@@ -1,94 +1,94 @@
 // src/faq.js
-const https = require('https');
-const { URL } = require('url');
+// Carga y refresca las FAQs desde Google Sheets (TSV) siguiendo redirecciones 307.
+// Usa env: FAQ_CSV_URL (obligatorio) y FAQ_REFRESH_MIN (opcional, por defecto 15).
 
-const CSV_URL = process.env.FAQ_CSV_URL || '';
+const FAQ_URL = process.env.FAQ_CSV_URL || "";
 const REFRESH_MIN = Number(process.env.FAQ_REFRESH_MIN || 15);
-let rows = []; // [{ patterns: ['precio','cuanto cuesta'], answer:'...', tag:'ventas' }]
 
-function normalize(s='') {
+let FAQ = []; // [{ pats: ["precio","cuanto"], respuesta:"...", tag:"ventas" }]
+
+function log(...a) { console.log("[FAQ]", ...a); }
+function warn(...a) { console.warn("[FAQ]", ...a); }
+
+// Normaliza texto para match simple
+function normalize(s = "") {
   return s
-    .normalize('NFD').replace(/\p{Diacritic}/gu, '')
-    .toLowerCase().trim();
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita acentos
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function fetchTsv(url) {
-  return new Promise((resolve, reject) => {
-    if (!url) return reject(new Error('FAQ_CSV_URL vacío'));
-    const u = new URL(url);
-    https.get(u, (res) => {
-      if (res.statusCode !== 200) {
-        return reject(new Error(`FAQ TSV HTTP ${res.statusCode}`));
-      }
-      let data = '';
-      res.on('data', (d) => data += d);
-      res.on('end', () => resolve(data));
-    }).on('error', reject);
-  });
-}
+// Parsea TSV (primera fila es header: PATRON | RESPUESTA | TAG)
+function parseTSV(tsv) {
+  // quita BOM si existiera
+  if (tsv.charCodeAt(0) === 0xFEFF) tsv = tsv.slice(1);
 
-function parseTsv(tsv) {
   const lines = tsv.split(/\r?\n/).filter(Boolean);
-  if (lines.length === 0) return [];
-  const out = [];
-  const header = lines[0].toLowerCase();
-  const hasHeader = header.includes('patron') || header.includes('patrón');
+  if (!lines.length) return [];
 
-  for (let i = hasHeader ? 1 : 0; i < lines.length; i++) {
-    const parts = lines[i].split('\t');
-    const patron = (parts[0] || '').trim();
-    const resp = (parts[1] || '').trim();
-    const tag  = (parts[2] || '').trim();
-    if (!patron || !resp) continue;
+  // descarta encabezado
+  lines.shift();
 
-    const patterns = patron.split('|').map(p => normalize(p)).filter(Boolean);
-    out.push({ patterns, answer: resp, tag });
+  const rows = [];
+  for (const line of lines) {
+    const [patron = "", respuesta = "", tag = ""] = line.split("\t");
+    const pats = patron
+      .split("|")
+      .map(s => normalize(s))
+      .filter(Boolean);
+    if (!pats.length || !respuesta) continue;
+    rows.push({ pats, respuesta, tag: tag.trim() });
   }
-  return out;
+  return rows;
 }
 
-async function reloadFaq() {
+// Descarga el TSV siguiendo redirecciones (clave para evitar HTTP 307)
+async function fetchTSV() {
+  if (!FAQ_URL) throw new Error("FAQ_CSV_URL no definido");
+  const res = await fetch(FAQ_URL, { redirect: "follow" }); // <= lo importante
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} al leer TSV`);
+  }
+  const text = await res.text();
+  return text;
+}
+
+async function loadFaqOnce() {
   try {
-    const tsv = await fetchTsv(CSV_URL);
-    rows = parseTsv(tsv);
-    console.log(`✅ FAQ cargada: ${rows.length} filas`);
-    return rows.length;
+    const tsv = await fetchTSV();
+    FAQ = parseTSV(tsv);
+    log(`Cargadas ${FAQ.length} filas FAQ desde Google Sheets.`);
   } catch (e) {
-    console.warn('⚠️ No se pudo cargar FAQ TSV:', e.message);
-    return 0;
+    warn("No se pudo cargar FAQ TSV:", e.message);
   }
 }
 
-function initFaq() {
-  if (!CSV_URL) {
-    console.warn('⚠️ FAQ_CSV_URL no definido.');
+function startAutoRefresh() {
+  if (!FAQ_URL) {
+    warn("FAQ_CSV_URL no definido; no se cargará FAQ.");
     return;
   }
-  reloadFaq();
-  if (REFRESH_MIN > 0) {
-    setInterval(reloadFaq, REFRESH_MIN * 60 * 1000);
-  }
+  // carga inicial
+  loadFaqOnce();
+  // refresco periódico
+  const ms = Math.max(1, REFRESH_MIN) * 60 * 1000;
+  setInterval(loadFaqOnce, ms);
 }
 
-function answerFromFaq(text='') {
-  if (!text || rows.length === 0) return null;
-  const t = normalize(text);
-  let best = null;
-  let bestScore = 0;
+function findAnswer(userText = "") {
+  const t = normalize(userText);
+  if (!t || !FAQ.length) return null;
 
-  for (const r of rows) {
-    for (const pat of r.patterns) {
-      if (!pat) continue;
-      if (t.includes(pat)) {
-        const score = pat.length; // patrón más específico gana
-        if (score > bestScore) {
-          bestScore = score;
-          best = r;
-        }
+  for (const row of FAQ) {
+    for (const p of row.pats) {
+      if (p && t.includes(p)) {
+        return row.respuesta;
       }
     }
   }
-  return best ? best.answer : null;
+  return null;
 }
 
-module.exports = { initFaq, reloadFaq, answerFromFaq };
+module.exports = { startAutoRefresh, findAnswer };
