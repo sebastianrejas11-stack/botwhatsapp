@@ -1,5 +1,7 @@
 // src/bootstrap.js
 // Baileys es ESM. En CJS debemos cargarlo con dynamic import() dentro de una función async.
+const fs = require('fs');
+const path = require('path');
 const pino = require('pino');
 const { handleMessage } = require('./handlers');
 
@@ -11,7 +13,16 @@ async function connectToWhatsApp() {
     fetchLatestBaileysVersion
   } = await import('@whiskeysockets/baileys');
 
-  const { state, saveCreds } = await useMultiFileAuthState('./auth');
+  // ====== USAR VOLUMEN /data ======
+  const DATA_DIR = process.env.DATA_DIR || './data';
+  const AUTH_DIR = path.join(DATA_DIR, 'auth');
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+
+  // 🔍 Logs de diagnóstico (útiles para Railway → Deploy Logs)
+  console.log('🧭 process.env.DATA_DIR:', process.env.DATA_DIR);
+  console.log('🟩 USANDO DIRECTORIO DE AUTENTICACIÓN:', AUTH_DIR);
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -24,7 +35,9 @@ async function connectToWhatsApp() {
   sock.ev.on('connection.update', (update) => {
     const { qr, connection } = update;
     if (qr) {
-      const url = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(qr);
+      const url =
+        'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' +
+        encodeURIComponent(qr);
       console.log('🔗 QR directo (clic y escanear):', url);
     }
     if (connection === 'open') {
@@ -32,7 +45,9 @@ async function connectToWhatsApp() {
     }
     if (connection === 'close') {
       console.log('❌ Conexión cerrada. Reintentando...');
-      connectToWhatsApp().catch(err => console.error('Reinicio falló:', err?.message));
+      connectToWhatsApp().catch((err) =>
+        console.error('Reinicio falló:', err?.message)
+      );
     }
   });
 
@@ -41,11 +56,13 @@ async function connectToWhatsApp() {
   sock.ev.on('messages.upsert', async ({ type, messages }) => {
     if (type !== 'notify') return;
     const m = messages && messages[0];
-    try { await handleMessage(sock, m); }
-    catch (e) { console.error('Error al responder:', e?.message); }
+    try {
+      await handleMessage(sock, m);
+    } catch (e) {
+      console.error('Error al responder:', e?.message);
+    }
   });
 }
 
 module.exports = { connectToWhatsApp };
-
 
