@@ -65,4 +65,3 @@ async function connectToWhatsApp() {
 }
 
 module.exports = { connectToWhatsApp };
-
