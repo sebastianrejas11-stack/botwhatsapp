@@ -2,11 +2,13 @@
 const fs = require("fs");
 const path = require("path");
 
+// Usa /data si existe (Railway volumen), si no la carpeta actual
 const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd());
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
+// Carga segura
 let users = {};
 try {
   if (fs.existsSync(DB_FILE)) {
@@ -20,12 +22,20 @@ try {
   users = {};
 }
 
+// Guarda segura
 function save() {
-  try { fs.writeFileSync(DB_FILE, JSON.stringify(users, null, 2)); }
-  catch (e) { console.error("DB write error:", e?.message); }
+  try {
+    fs.writeFileSync(DB_FILE, JSON.stringify(users, null, 2));
+  } catch (e) {
+    console.error("DB write error:", e?.message);
+  }
 }
 
 function getUser(jid) { return users[jid]; }
-function upsertUser(jid, data) { users[jid] = { ...users[jid], ...data }; save(); return users[jid]; }
+function upsertUser(jid, data) {
+  users[jid] = { ...users[jid], ...data };
+  save();
+  return users[jid];
+}
 
 module.exports = { getUser, upsertUser };
