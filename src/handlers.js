@@ -7,8 +7,8 @@ const {
   LINK_GRUPO,
   LINK_BONO,
   LINK_PAGO,
-  REMINDER_WELCOME_MIN,   // ya no lo usamos para S0; seguimos usando 15' para FU
-  REMINDER_QR_MIN         // ya no lo usamos; lo dejamos por compatibilidad
+  REMINDER_WELCOME_MIN,
+  REMINDER_QR_MIN
 } = require('./config');
 
 const { getUser, upsertUser } = require('./state');
@@ -19,11 +19,14 @@ const OWNER_JID = OWNER_PHONE.replace(/\D/g, '') + '@s.whatsapp.net';
 const START_EPOCH = Math.floor(Date.now() / 1000);
 const HISTORY_GRACE_SEC = 30;
 
-// ====== Utilidades comunes ======
+// ====== Helpers ======
+const delay = (ms) => new Promise(res => setTimeout(res, ms));
+const humanPause = async () => delay(1200 + Math.floor(Math.random() * 600)); // ~1.2–1.8s
+
 function nextMondayDate() {
   const now = new Date();
-  const day = now.getDay(); // 0=Dom
-  const add = (1 - day + 7) % 7 || 7; // próximo lunes
+  const day = now.getDay();
+  const add = (1 - day + 7) % 7 || 7;
   const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + add);
   return d.toLocaleDateString('es-BO', { day: 'numeric', month: 'long' });
 }
@@ -51,7 +54,6 @@ function normalize(s = "") {
 
 function isStartTrigger(raw = "") {
   const t = normalize(raw);
-  // “✨ME UNO✨”, saludos, “me apunto”, “quiero unirme”
   if (t.includes("me uno")) return true;
   if (/\b(hola|buen dia|buen día|buenas)\b/i.test(t)) return true;
   if (t.includes("me apunto")) return true;
@@ -91,7 +93,7 @@ async function notifyOwner(sock, customerJid, title, body) {
   try { await sock.sendMessage(OWNER_JID, { text }); } catch {}
 }
 
-// ====== Envío de imágenes (busca en varias rutas) ======
+// ====== Envío de imágenes ======
 function findFirstExisting(paths) {
   for (const p of paths) {
     try { if (fs.existsSync(p)) return p; } catch {}
@@ -143,8 +145,9 @@ async function sendQR(sock, to, caption = 'Escanéalo y envíame tu comprobante 
   }
 }
 
-// ====== Mensajes de copy ======
-function copyPriceAndBonus() {
+// ====== Copy ======
+function copyPriceAndBonusCaption() {
+  // Este texto va dentro del CAPTION del QR (S0) → así enviamos solo 2 mensajes.
   return (
 `👉 El valor del reto es de *35 Bs*.
 Si te inscribes *HOY* recibes *GRATIS* el curso de meditación (12 clases) 🧘‍♀️
@@ -155,11 +158,10 @@ Aquí tienes el *QR* para tu inscripción.
 }
 
 function copyReSendQR(name = '') {
+  // Para reenvío del QR (S1) mantenemos un caption más breve
   return (
-`Claro${name ? ' ' + name : ''} 🙌 El valor es *35 Bs*.
-Al inscribirte *HOY* recibes *gratis* el curso de meditación (12 clases).
-
-Aquí tienes nuevamente el *QR* para tu inscripción:` );
+`Aquí tienes nuevamente el *QR* para tu inscripción.
+*Escanéalo* y envíame tu comprobante aquí mismo 📲` );
 }
 
 function copyWelcomeAfterPayment(name = '') {
@@ -196,11 +198,11 @@ Recuerda que al inscribirte *HOY* recibes:
 ¿Quieres que te pase el *QR* de nuevo?`);
 }
 
-// ====== Handler principal según flujo ======
+// ====== Handler principal ======
 async function handleMessage(sock, m) {
   const from = m.key?.remoteJid || '';
-  if (!from || from.endsWith('@g.us')) return; // ignora grupos
-  if (m.key.fromMe) return;                     // ignora mensajes propios
+  if (!from || from.endsWith('@g.us')) return;
+  if (m.key.fromMe) return;
 
   const ts = Number(m.messageTimestamp || 0);
   if (ts && ts < START_EPOCH - HISTORY_GRACE_SEC) return;
@@ -233,7 +235,7 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== S2 — Pago detectado (imagen o PDF o palabras clave) =====
+  // ===== S2 — Pago detectado (imagen o PDF o palabras) =====
   const hasImage = !!m.message?.imageMessage;
   const isPdf = (m.message?.documentMessage?.mimetype || '').includes('pdf');
   const saidPayment = /\b(pagu[eé]|pague|pago|comprobante|transferencia)\b/.test(lowered);
@@ -244,9 +246,9 @@ async function handleMessage(sock, m) {
     upsertUser(from, st);
 
     await sock.sendMessage(from, { text: copyWelcomeAfterPayment(st.nombre) });
+    await humanPause();
     await sock.sendMessage(from, { text: copyClose(st.nombre) });
 
-    // Notifica al owner
     await notifyOwner(
       sock,
       from,
@@ -261,20 +263,23 @@ async function handleMessage(sock, m) {
     st.lastPromptWasFollowUp = false;
     upsertUser(from, st);
 
-    await sock.sendMessage(from, { text: copyReSendQR(st.nombre) });
-    await sendQR(sock, from);
+    // Reenvío del QR: mensaje breve + QR con caption corto
+    await sock.sendMessage(from, { text: `Claro${st.nombre ? ' ' + st.nombre : ''} 🙌` });
+    await humanPause();
+    await sendQR(sock, from, copyReSendQR(st.nombre));
     return;
   }
 
-  // ===== S0 — Inicio / Primer contacto =====
+  // ===== S0 — Inicio / Primer contacto (SOLO 2 mensajes con ritmo humano) =====
   if (isStartTrigger(text) || st.stage === 'start') {
-    // Prueba social
+    // 1) Prueba social
     await sendSocialProof(sock, from);
-    // Precio + Bono + QR
-    await sock.sendMessage(from, { text: copyPriceAndBonus() });
-    await sendQR(sock, from);
+    await humanPause();
 
-    // Estado y follow-up a 15 minutos (solo una vez)
+    // 2) QR con caption que INCLUYE el precio + bono + CTA
+    await sendQR(sock, from, copyPriceAndBonusCaption());
+
+    // Estado y follow-up único a 15 min
     st.stage = 'waitingPayment';
     upsertUser(from, st);
 
@@ -297,13 +302,10 @@ async function handleMessage(sock, m) {
     return;
   }
 
-  // ===== Nombre completo (si quisieras pedirlo explícitamente) =====
-  // En este flujo no lo exigimos; puedes extraerlo luego si lo deseas.
-
   // ===== Duda no reconocida → notifica y silencio =====
   await notifyOwner(sock, from, 'Duda detectada', `Mensaje: "${text}"`);
-  // Intencionalmente no respondemos para evitar ruido.
 }
 
 module.exports = { handleMessage };
+
 
