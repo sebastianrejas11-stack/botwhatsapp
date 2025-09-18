@@ -65,14 +65,23 @@ function isStartTrigger(loweredRaw = "") {
   return false;
 }
 
+// QR con bono en el mismo mensaje (caption si hay imagen)
 async function sendQR(sock, to) {
+  const caption =
+    'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".\n\n' +
+    'Escanea este QR para inscribirte ✅';
+
   try {
-    const file = path.join(process.cwd(), 'qr.jpg'); // coloca qr.jpg en raíz del proyecto
+    const file = path.join(process.cwd(), 'qr.jpg'); // coloca qr.jpg en la raíz del proyecto
     if (fs.existsSync(file)) {
       const buffer = fs.readFileSync(file);
-      await sock.sendMessage(to, { image: buffer, caption: 'Escanea este QR para inscribirte ✅' });
+      await sock.sendMessage(to, { image: buffer, caption });
     } else {
-      await sock.sendMessage(to, { text: `Escanea aquí: ${LINK_PAGO}` });
+      await sock.sendMessage(to, {
+        text:
+          'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".\n\n' +
+          `Escanea aquí: ${LINK_PAGO}`
+      });
     }
   } catch (e) {
     console.error('Error enviando QR:', e?.message);
@@ -192,8 +201,11 @@ async function handleMessage(sock, m) {
 
     st.nombre = text.replace(/[^\p{L}\s'.-]/gu, '').trim();
     const fecha = nextMondayDate();
+
+    // Solo precio aquí
     await sock.sendMessage(from, { text: `Buen día, ${st.nombre}. El reto de 21 días inicia el próximo lunes ${fecha}. El valor del programa es 35 Bs.` });
-    await sock.sendMessage(from, { text: 'Si te inscribes hoy, recibes de regalo el curso de 12 días: "Aprende a meditar desde cero".' });
+
+    // QR con bono en el caption / texto
     await sendQR(sock, from);
 
     st.stage = 'quoted';
@@ -236,3 +248,4 @@ async function handleMessage(sock, m) {
 }
 
 module.exports = { handleMessage };
+
